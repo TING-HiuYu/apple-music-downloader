@@ -211,6 +211,7 @@ RUN chmod +x /usr/local/bin/container-entrypoint && \
     mkdir -p /tmp/amdl-downloads /app/data /opt/wrapper/rootfs/data/data/com.apple.android.music/files
 
 WORKDIR /app
+VOLUME ["/app/data", "/opt/wrapper/rootfs/data/data/com.apple.android.music/files"]
 EXPOSE 8080 10020 20020 30020
 HEALTHCHECK --interval=30s --timeout=4s --start-period=20s --retries=3 CMD curl -fsS http://127.0.0.1:8080/api/health || exit 1
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/container-entrypoint"]

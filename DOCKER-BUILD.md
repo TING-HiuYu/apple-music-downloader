@@ -76,26 +76,40 @@ docker compose up -d --build
 Without Compose, create the container directly:
 
 ```sh
+docker volume create apple-music-downloader-queue
+docker volume create apple-music-downloader-wrapper
+
 docker run -d \
   --name apple-music-downloader \
   --restart unless-stopped \
   --privileged \
   -p 127.0.0.1:8080:8080 \
+  --mount source=apple-music-downloader-queue,target=/app/data \
+  --mount source=apple-music-downloader-wrapper,target=/opt/wrapper/rootfs/data/data/com.apple.android.music/files \
   apple-music-downloader:local
 ```
 
 Open <http://localhost:8080>. The service is published only on the host loopback
-address (`127.0.0.1`). Docker Compose does not mount host directories, named
-volumes, configuration files, or Docker Secrets.
+address (`127.0.0.1`). Docker Compose mounts named volumes only; it does not bind
+host directories, configuration files, or Docker Secrets.
 
 Choose **下载目录** to let the browser handle completed files using its normal
 download settings. Choose **其他位置** to grant a compatible browser a directory
 handle for the current page. In both modes, files are streamed from the
 container; the staged copy is removed after delivery or browser acknowledgement.
 
-SQLite stores pending tasks only inside the container writable layer. As soon as
-a task starts it is deleted from SQLite. Progress, completed history, and failed
-history remain in memory and disappear when the process is recreated.
+`apple-music-downloader-queue` stores `/app/data/queue.db`. Playlist submission
+resolves every catalog page and writes one pending row per track, including its
+display metadata and stable queue order. As soon as a task starts it is deleted
+from SQLite. Progress, completed history, and failed history remain in memory
+and disappear when the process is recreated.
+
+`apple-music-downloader-wrapper` mounts Wrapper's complete Apple Music `files`
+directory. This persists `kvs.sqlitedb`, its WAL files, cookies, account data,
+tokens, and the other files Wrapper needs to reuse an authenticated session.
+The volume is sensitive local account state. Completed downloads and temporary
+2FA files are not retained as queue data; completed media staging stays under
+`/tmp` and is removed after browser delivery.
 
 If no usable Wrapper process is running, the page opens a blocking login dialog.
 Credentials are accepted by `POST /api/wrapper/login`, used only to start the

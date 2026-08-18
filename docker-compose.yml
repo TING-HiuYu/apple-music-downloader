@@ -13,4 +13,13 @@ services:
     privileged: true
     environment:
       WRAPPER_DISABLED: ${WRAPPER_DISABLED:-0}
+    volumes:
+      - amdl-queue:/app/data
+      - amdl-wrapper:/opt/wrapper/rootfs/data/data/com.apple.android.music/files
     restart: unless-stopped
+
+volumes:
+  amdl-queue:
+    name: ${AMDL_QUEUE_VOLUME:-apple-music-downloader-queue}
+  amdl-wrapper:
+    name: ${AMDL_WRAPPER_VOLUME:-apple-music-downloader-wrapper}

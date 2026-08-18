@@ -18,7 +18,10 @@ SQLite queue persistence, and multi-architecture Docker images for
   [wenfeng110402/AppleMusic-Downloader](https://github.com/wenfeng110402/AppleMusic-Downloader).
 - A native Go HTTP API: jobs call the existing downloader functions directly;
   the backend does not spawn the CLI as a subprocess.
-- A serial task queue backed by SQLite for pending jobs.
+- A serial task queue backed by SQLite for pending jobs. Playlist URLs are
+  resolved into one readable queue item per track before downloading starts.
+  The active job can be paused or resumed, and all unfinished jobs can be
+  canceled and removed from both the UI and SQLite in one action.
 - Browser-based file delivery, so the container needs no host-directory mount.
 - Wrapper login, Apple two-factor-code submission, status reporting, and logout
   from the web UI. Credentials and verification codes are never persisted by
@@ -41,7 +44,8 @@ Local browser
           ↕ HTTP on host loopback only
 Go web/API service
   ├─ Wrapper lifecycle and status manager
-  ├─ SQLite pending-job queue (serial execution)
+  ├─ playlist resolver → one SQLite queue row per track
+  ├─ SQLite pending-job queue (serial execution, persistent volume)
   ├─ existing native Go downloader functions
   └─ temporary completed-file staging
           ├─ Wrapper: Apple Music authentication/decryption service
@@ -50,9 +54,11 @@ Go web/API service
 ```
 
 The downloader uses package-level state inherited from the upstream CLI, so web
-jobs are deliberately serialized. A job is removed from SQLite when execution
-starts. Running progress and completed/failed history live in memory; SQLite is
-not used as a progress cache.
+jobs are deliberately serialized. Playlist metadata is resolved when a URL is
+submitted; every track gets its own task title, artist, playlist position, and
+pending SQLite row. A job is removed from SQLite when execution starts. Running
+progress and completed/failed history live in memory; SQLite is not used as a
+progress cache.
 
 Completed files stay in a temporary container directory only until the browser
 has received them. The API exposes opaque file IDs rather than container paths.
@@ -72,16 +78,21 @@ multi-user internet service.
 
 ### Docker Desktop / Docker CLI (recommended)
 
-No Compose file and no host-directory mount are required:
+No Compose file or host-directory bind mount is required. Create two named
+volumes so the pending queue and Wrapper session survive container replacement:
 
 ```sh
 docker pull ghcr.io/ting-hiuyu/apple-music-downloader:latest
+docker volume create apple-music-downloader-queue
+docker volume create apple-music-downloader-wrapper
 
 docker run -d \
   --name apple-music-downloader \
   --restart unless-stopped \
   --privileged \
   -p 127.0.0.1:8080:8080 \
+  --mount source=apple-music-downloader-queue,target=/app/data \
+  --mount source=apple-music-downloader-wrapper,target=/opt/wrapper/rootfs/data/data/com.apple.android.music/files \
   ghcr.io/ting-hiuyu/apple-music-downloader:latest
 ```
 
@@ -104,8 +115,16 @@ docker stop apple-music-downloader
 docker rm apple-music-downloader
 ```
 
-Removing/recreating the container also removes its pending SQLite queue and
-Wrapper session because this deployment intentionally defines no volume.
+Removing or recreating the container does not remove these named volumes. The
+first stores `/app/data/queue.db`; the second stores Wrapper's session database,
+including `kvs.sqlitedb`, cookies, account data, and related WAL files. Treat the
+Wrapper volume as sensitive local account data.
+
+To intentionally reset both persistent stores after removing the container:
+
+```sh
+docker volume rm apple-music-downloader-queue apple-music-downloader-wrapper
+```
 
 ### Docker Compose
 
@@ -122,7 +141,9 @@ AMDL_PORT=8088 docker compose up -d --build
 ```
 
 The supplied Compose file also binds only to `127.0.0.1`, enables privileged
-mode, and mounts no host paths or Docker Secrets.
+mode, and creates `apple-music-downloader-queue` and
+`apple-music-downloader-wrapper` named volumes. It mounts no host paths or
+Docker Secrets.
 
 ### Build images locally
 
@@ -178,6 +199,10 @@ is the supported all-in-one installation.
 5. Choose **Downloads** to let the browser handle the file, or **Other location**
    to select a directory in a compatible browser.
 
+When a playlist URL is submitted, the API resolves all catalog pages first and
+adds one pending task per track. The task list shows the track title, artist,
+playlist name, and position such as `3/24`; each track then downloads serially.
+
 Wrapper accepts the final verification code but does not provide an API for this
 project to select Apple's delivery method, trusted device, or phone number.
 
@@ -194,9 +219,14 @@ Allow it if you selected browser Downloads.
   authentication, the backend restarts Wrapper without those arguments.
 - The six-digit verification code is written with mode `0600` only to Wrapper's
   expected runtime path and is not stored in SQLite.
-- SQLite stores pending queue entries only; it does not cache progress.
-- The default Docker deployment has no volumes. Session, queue, and staged files
-  are part of the container's ephemeral writable layer.
+- SQLite stores pending queue entries only; playlist tracks are separate rows.
+  It does not cache running progress or completed/failed history.
+- The queue named volume persists `/app/data/queue.db`. The Wrapper named volume
+  persists `kvs.sqlitedb` and the other upstream session files required for a
+  usable login. Credentials and six-digit codes are still not stored by this
+  application.
+- Completed-file staging remains ephemeral and is never written to either
+  volume.
 - Browser Downloads use the browser's configured directory. With **Other
   location**, the browser grants the page a directory handle and writes each
   streamed file there.
@@ -211,6 +241,8 @@ Allow it if you selected browser Downloads.
 | `WRAPPER_AMD64_URL` | AMD64 Wrapper release ZIP | `Wrapper.x86_64.latest` |
 | `WRAPPER_SHA256` | Optional release checksum validation | empty |
 | `AMDL_PORT` | Compose host port | `8080` |
+| `AMDL_QUEUE_VOLUME` | Compose queue-volume name | `apple-music-downloader-queue` |
+| `AMDL_WRAPPER_VOLUME` | Compose Wrapper-volume name | `apple-music-downloader-wrapper` |
 | `WRAPPER_DISABLED=1` | Disable Wrapper for UI/API development | `0` |
 
 Wrapper's `latest` release tags are mutable. For controlled builds, mirror a

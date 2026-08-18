@@ -22,7 +22,8 @@ function navigate(view) {
 
 function statusText(task) {
   if (task.status === "running") return task.message || "下载中 (0%)";
-  return ({ queued: "等待中", completed: "已完成", failed: "失败" })[task.status] || task.status;
+  if (task.status === "paused") return task.message || "已暂停";
+  return ({ queued: "等待中", canceling: "正在取消", canceled: "已取消", completed: "已完成", failed: "失败" })[task.status] || task.status;
 }
 
 function formatBytes(bytes) {
@@ -33,54 +34,53 @@ function formatBytes(bytes) {
 }
 
 const embeddingSupport = {
-  none: { lyrics: true, cover: true },
-  flac: { lyrics: true, cover: true },
-  mp3: { lyrics: true, cover: true },
-  opus: { lyrics: true, cover: false },
-  wav: { lyrics: false, cover: false }
+  none: { cover: true },
+  flac: { cover: true },
+  mp3: { cover: true },
+  opus: { cover: false },
+  wav: { cover: false }
 };
 
 function syncEmbeddingFormats() {
   const formatSelect = $("#convert-format");
-  const embedLyrics = $("#embed-lyrics").checked;
-  const embedCover = $("#embed-cover").checked;
-  let changed = false;
+  const coverInput = $("#embed-cover");
+  const selectedSupport = embeddingSupport[formatSelect.value] || { cover: true };
+
+  if (!selectedSupport.cover) coverInput.checked = false;
+  coverInput.disabled = !selectedSupport.cover;
+  coverInput.closest("label").classList.toggle("disabled", coverInput.disabled);
 
   [...formatSelect.options].forEach((option) => {
-    const support = embeddingSupport[option.value] || { lyrics: true, cover: true };
-    option.disabled = (embedLyrics && !support.lyrics) || (embedCover && !support.cover);
-    if (option.disabled && option.selected) changed = true;
+    const support = embeddingSupport[option.value] || { cover: true };
+    option.disabled = coverInput.checked && !support.cover;
   });
-
-  if (changed) {
-    formatSelect.value = "none";
-    const message = $("#form-message");
-    message.textContent = "当前内嵌选项不受所选格式支持，已切换为保持原格式。";
-    message.className = "form-message show";
-  }
 }
 
 function renderTasks() {
-  $("#queue-count").textContent = state.tasks.filter((task) => ["queued", "running"].includes(task.status)).length;
+  $("#queue-count").textContent = state.tasks.filter((task) => ["queued", "running", "paused", "canceling"].includes(task.status)).length;
   const container = $("#task-list");
   if (!state.tasks.length) {
     container.innerHTML = '<div class="empty-state"><span>♪</span><h3>还没有下载任务</h3><p>从“新建下载”添加 Apple Music 链接。</p></div>';
+    syncActiveTaskControl();
     return;
   }
   container.innerHTML = state.tasks.map((task) => {
     const firstURL = task.request.urls[0] || "Apple Music 下载";
     const extra = task.request.urls.length > 1 ? ` +${task.request.urls.length - 1}` : "";
-    const symbol = task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "↓" : "…";
+    const title = task.title || `${firstURL}${extra}`;
+    const trackPosition = task.trackTotal ? `${task.trackNumber}/${task.trackTotal}` : "";
+    const details = [task.artist, task.collection, trackPosition, (task.request.quality || "alac").toUpperCase(), new Date(task.createdAt).toLocaleString()].filter(Boolean);
+    const symbol = task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "canceled" ? "×" : task.status === "running" ? "↓" : task.status === "paused" ? "Ⅱ" : "…";
     const files = task.files || [];
     const pendingFiles = files.filter((file) => !file.delivered);
     const totalSize = pendingFiles.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
     const delivery = task.status === "completed" && pendingFiles.length
       ? `<p class="delivery-state">${state.destinationMode === "downloads" ? "正在交给浏览器下载" : "正在保存"} · ${pendingFiles.length} 个文件 · ${formatBytes(totalSize)}</p>`
       : "";
-    return `<article class="task-card">
+    return `<article class="task-card" data-task-id="${esc(task.id)}">
       <div class="task-head">
         <span class="task-status ${esc(task.status)}">${symbol}</span>
-        <div class="task-title"><strong title="${esc(firstURL)}">${esc(firstURL)}${extra}</strong><small>${esc((task.request.quality || "alac").toUpperCase())} · ${new Date(task.createdAt).toLocaleString()}</small></div>
+        <div class="task-title"><strong title="${esc(firstURL)}">${esc(title)}</strong><small>${details.map(esc).join(" · ")}</small></div>
         <span class="task-state-label">${esc(statusText(task))}</span>
       </div>
       <div class="progress"><span style="width:${Number(task.progress) || 0}%"></span></div>
@@ -88,14 +88,76 @@ function renderTasks() {
       ${delivery}
     </article>`;
   }).join("");
+  syncActiveTaskControl();
 }
 
+function syncActiveTaskControl() {
+  const toggleButton = $("#toggle-active-task");
+  const cancelButton = $("#cancel-all-tasks");
+  const activeTask = state.tasks.find((item) => ["running", "paused", "canceling"].includes(item.status));
+  const cancelableTasks = state.tasks.filter((item) => ["queued", "running", "paused", "canceling"].includes(item.status));
+  toggleButton.hidden = !activeTask || activeTask.status === "canceling";
+  cancelButton.hidden = cancelableTasks.length === 0;
+  cancelButton.disabled = cancelableTasks.length > 0 && cancelableTasks.every((item) => item.status === "canceling");
+  cancelButton.dataset.taskCount = String(cancelableTasks.length);
+  if (!activeTask) {
+    delete toggleButton.dataset.taskId;
+    delete toggleButton.dataset.taskAction;
+  } else {
+    toggleButton.dataset.taskId = activeTask.id;
+    toggleButton.dataset.taskAction = activeTask.status === "paused" ? "resume" : "pause";
+    toggleButton.textContent = activeTask.status === "paused" ? "继续" : "暂停";
+  }
+  cancelButton.textContent = cancelButton.disabled ? "正在取消" : "取消全部";
+}
+
+function taskLayoutChanged(previous, next) {
+  if (previous.length !== next.length) return true;
+  return next.some((task, index) => {
+    const before = previous[index];
+    if (!before || before.id !== task.id || before.status !== task.status) return true;
+    const beforeFiles = (before.files || []).map((file) => `${file.id}:${file.delivered}`).join("|");
+    const nextFiles = (task.files || []).map((file) => `${file.id}:${file.delivered}`).join("|");
+    return beforeFiles !== nextFiles;
+  });
+}
+
+function patchTaskProgress() {
+  for (const task of state.tasks) {
+    const card = $(`#task-list [data-task-id="${task.id}"]`);
+    if (!card) continue;
+    const progress = card.querySelector(".progress span");
+    const label = card.querySelector(".task-state-label");
+    if (progress) progress.style.width = `${Number(task.progress) || 0}%`;
+    if (label) label.textContent = statusText(task);
+  }
+  syncActiveTaskControl();
+}
+
+let taskLoadPromise = null;
 async function loadTasks() {
+  if (taskLoadPromise) return taskLoadPromise;
+  taskLoadPromise = (async () => {
+    try {
+      const tasks = await api("/api/tasks");
+      const needsRender = taskLayoutChanged(state.tasks, tasks);
+      state.tasks = tasks;
+      if (needsRender) renderTasks();
+      else patchTaskProgress();
+      savePendingFiles();
+    } catch (_) {}
+  })();
   try {
-    state.tasks = await api("/api/tasks");
-    renderTasks();
-    savePendingFiles();
-  } catch (_) {}
+    await taskLoadPromise;
+  } finally {
+    taskLoadPromise = null;
+  }
+}
+
+async function pollTasks() {
+  await loadTasks();
+  const hasRunningTask = state.tasks.some((task) => task.status === "running");
+  window.setTimeout(pollTasks, !document.hidden && hasRunningTask ? 50 : 1000);
 }
 
 async function chooseDownloadDirectory() {
@@ -335,7 +397,7 @@ $("#download-form").addEventListener("submit", async (event) => {
     if (state.destinationMode === "other" && (!state.directoryHandle || !state.directoryPath)) {
       throw new Error("请先选择下载目录，再加入下载队列。");
     }
-    const task = await api("/api/tasks", {
+    const result = await api("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -343,13 +405,14 @@ $("#download-form").addEventListener("submit", async (event) => {
         quality,
         outputPath: state.destinationMode === "downloads" ? "browser-downloads" : state.directoryPath,
         convertFormat: $("#convert-format").value,
-        embedLyrics: $("#embed-lyrics").checked,
-        saveLyrics: $("#save-lyrics").checked,
         embedCover: $("#embed-cover").checked
       })
     });
+    const tasks = result.tasks || [];
     $("#urls").value = "";
-    message.textContent = `任务 ${task.id.slice(0, 8)} 已加入队列。`;
+    message.textContent = tasks.length > 1
+      ? `已解析并加入 ${tasks.length} 个曲目任务。`
+      : `任务 ${(tasks[0]?.id || "").slice(0, 8)} 已加入队列。`;
     message.className = "form-message show";
     await loadTasks();
     setTimeout(() => navigate("queue"), 450);
@@ -365,8 +428,8 @@ $$('.quality input').forEach((input) => input.addEventListener("change", () => {
   $$(".quality").forEach((label) => label.classList.toggle("active", label.contains($('input[name="quality"]:checked'))));
 }));
 
-$("#embed-lyrics").addEventListener("change", syncEmbeddingFormats);
 $("#embed-cover").addEventListener("change", syncEmbeddingFormats);
+$("#convert-format").addEventListener("change", syncEmbeddingFormats);
 syncEmbeddingFormats();
 
 async function refreshWithAnimation(button, refresh) {
@@ -386,6 +449,34 @@ async function refreshWithAnimation(button, refresh) {
 $$('.nav-item').forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
 $("#mobile-nav-toggle").addEventListener("click", () => $(".sidebar").classList.toggle("open"));
 $("#refresh-tasks").addEventListener("click", (event) => refreshWithAnimation(event.currentTarget, loadTasks));
+$("#toggle-active-task").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (!button.dataset.taskId || !button.dataset.taskAction) return;
+  button.disabled = true;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(button.dataset.taskId)}/${button.dataset.taskAction}`, { method: "POST" });
+    await loadTasks();
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#cancel-all-tasks").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const taskCount = Number(button.dataset.taskCount) || 0;
+  if (!taskCount) return;
+  if (!window.confirm(`确定取消全部 ${taskCount} 个未完成任务？已下载的临时数据会被删除。`)) return;
+  button.disabled = true;
+  try {
+    await api("/api/tasks/cancel-all", { method: "POST" });
+    await loadTasks();
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#refresh-system").addEventListener("click", (event) => refreshWithAnimation(event.currentTarget, loadSystem));
 $("#download-destination").addEventListener("change", async (event) => {
   const selector = event.currentTarget;
@@ -434,7 +525,6 @@ $("#theme-toggle").addEventListener("click", () => {
 });
 
 loadHealth();
-loadTasks();
+pollTasks();
 loadWrapperAuth();
-setInterval(loadTasks, 3000);
 setInterval(loadWrapperAuth, 900);

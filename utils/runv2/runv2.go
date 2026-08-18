@@ -75,7 +75,10 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func Run(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress func(string, int)) error {
+func Run(parentContext context.Context, adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress func(string, int)) error {
+	if parentContext == nil {
+		parentContext = context.Background()
+	}
 	emitProgress(progress, "download", 0)
 	var err error
 	var optstimeout uint
@@ -84,7 +87,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	header := make(http.Header)
 
 	// request media playlist
-	req, err := http.NewRequest("GET", playlistUrl, nil)
+	req, err := http.NewRequestWithContext(parentContext, "GET", playlistUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -119,7 +122,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	}
 
 	// request mp4
-	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx, cancel := context.WithCancelCause(parentContext)
 	defer cancel(nil)
 	req, err = http.NewRequestWithContext(ctx, "GET", fileUrl.String(), nil)
 	if err != nil {
@@ -187,7 +190,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 
 	var totalLen int64
 	totalLen = do.ContentLength
-	err = decryptWithWrapper(body, outfile, adamId, segments, totalLen, Config, progress)
+	err = decryptWithWrapper(ctx, body, outfile, adamId, segments, totalLen, Config, progress)
 	for retry := 1; retry <= 2 && err != nil && bufferedMedia != nil && isRetryableDecryptError(err); retry++ {
 		// The current ARM64 Wrapper release can terminate its Android child while
 		// establishing the first FairPlay context after login. The web process
@@ -204,7 +207,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 			continue
 		}
 		emitProgress(progress, "decrypt", 0)
-		err = decryptWithWrapper(bytes.NewReader(bufferedMedia), outfile, adamId, segments, totalLen, Config, progress)
+		err = decryptWithWrapper(ctx, bytes.NewReader(bufferedMedia), outfile, adamId, segments, totalLen, Config, progress)
 	}
 	if err != nil {
 		return err
@@ -213,8 +216,11 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	return nil
 }
 
-func decryptWithWrapper(body io.Reader, outfile string, adamId string, segments []*m3u8.MediaSegment,
+func decryptWithWrapper(ctx context.Context, body io.Reader, outfile string, adamId string, segments []*m3u8.MediaSegment,
 	totalLen int64, Config structs.ConfigSet, progress func(string, int)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := warmDecryptor(Config.DecryptM3u8Port, adamId, segments); err != nil {
 		return fmt.Errorf("prepare Wrapper key context: %w", err)
 	}
@@ -223,7 +229,16 @@ func decryptWithWrapper(body io.Reader, outfile string, adamId string, segments 
 		return err
 	}
 	defer Close(conn)
-	return downloadAndDecryptFile(conn, body, outfile, adamId, segments, totalLen, Config, progress)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
+	return downloadAndDecryptFile(ctx, conn, body, outfile, adamId, segments, totalLen, Config, progress)
 }
 
 func warmDecryptor(address string, adamId string, segments []*m3u8.MediaSegment) error {
@@ -331,7 +346,7 @@ func waitForDecryptor(address string, timeout time.Duration) error {
 	return fmt.Errorf("Wrapper did not restore %s within %s", address, timeout)
 }
 
-func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
+func downloadAndDecryptFile(ctx context.Context, conn io.ReadWriter, in io.Reader, outfile string,
 	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config structs.ConfigSet, progress func(string, int)) error {
 	emitProgress(progress, "decrypt", 0)
 	var buffer bytes.Buffer
@@ -395,6 +410,9 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	}
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var frag *mp4.Fragment
 		rawoffset := offset
 		frag, offset, err = ReadNextFragment(inBuf, offset)

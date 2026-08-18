@@ -3,13 +3,13 @@ authorization-token: "your-authorization-token" #You don't need to change it; it
 language: ""         #supportedLanguage by each storefront --> https://gist.github.com/itouakirai/c8ba9df9dc65bd300094103b058731d0
 lrc-type: "lyrics"   #lyrics or syllable-lyrics
 lrc-format: "lrc"   #lrc or ttml
-embed-lrc: true
+embed-lrc: false
 save-lrc-file: false
 save-artist-cover: false
 save-animated-artwork: false    # If enabled, requires ffmpeg
 emby-animated-artwork: false    # If enabled, requires ffmpeg
 embed-cover: true
-cover-size: 5000x5000
+cover-size: 1080x1080
 cover-format: jpg       #jpg png or original
 tag-sort-order: true
 tag-itunes-id: true
@@ -56,7 +56,7 @@ apple-master-choice : "[M]"
 use-songinfo-for-playlist: false
 
 #if set true,will download album cover for playlist
-dl-albumcover-for-playlist: false
+dl-albumcover-for-playlist: true
 mv-audio-type: atmos  #atmos ac3 aac
 mv-max: 2160
 

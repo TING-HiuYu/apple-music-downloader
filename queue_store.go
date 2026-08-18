@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -40,6 +41,7 @@ func openQueueStore(path string) (*queueStore, error) {
 		`CREATE TABLE IF NOT EXISTS pending_tasks (
             id TEXT PRIMARY KEY,
             request_json BLOB NOT NULL,
+            task_json BLOB,
             created_at INTEGER NOT NULL
         )`,
 		"CREATE INDEX IF NOT EXISTS idx_pending_tasks_created_at ON pending_tasks(created_at)",
@@ -51,22 +53,69 @@ func openQueueStore(path string) (*queueStore, error) {
 			return nil, fmt.Errorf("initialize queue database: %w", err)
 		}
 	}
+	if err := ensureQueueColumn(db, "task_json", "BLOB"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &queueStore{db: db}, nil
 }
 
-func (s *queueStore) enqueue(task *WebTask) error {
-	requestJSON, err := json.Marshal(task.Request)
+func ensureQueueColumn(db *sql.DB, name, definition string) error {
+	rows, err := db.Query("PRAGMA table_info(pending_tasks)")
 	if err != nil {
-		return fmt.Errorf("encode queued task: %w", err)
+		return fmt.Errorf("inspect queue database: %w", err)
 	}
-	_, err = s.db.Exec(
-		"INSERT INTO pending_tasks(id, request_json, created_at) VALUES(?, ?, ?)",
-		task.ID,
-		requestJSON,
-		task.CreatedAt.UnixMilli(),
-	)
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var columnName, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return fmt.Errorf("inspect queue column: %w", err)
+		}
+		if columnName == name {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect queue columns: %w", err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := db.Exec("ALTER TABLE pending_tasks ADD COLUMN " + name + " " + definition); err != nil {
+		return fmt.Errorf("migrate queue database: %w", err)
+	}
+	return nil
+}
+
+func (s *queueStore) enqueueMany(tasks []*WebTask) error {
+	transaction, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("persist queued task: %w", err)
+		return fmt.Errorf("start queue transaction: %w", err)
+	}
+	defer transaction.Rollback()
+	statement, err := transaction.Prepare("INSERT INTO pending_tasks(id, request_json, task_json, created_at) VALUES(?, ?, ?, ?)")
+	if err != nil {
+		return fmt.Errorf("prepare queued tasks: %w", err)
+	}
+	defer statement.Close()
+	for _, task := range tasks {
+		requestJSON, err := json.Marshal(task.Request)
+		if err != nil {
+			return fmt.Errorf("encode queued task request: %w", err)
+		}
+		taskJSON, err := json.Marshal(task)
+		if err != nil {
+			return fmt.Errorf("encode queued task: %w", err)
+		}
+		if _, err := statement.Exec(task.ID, requestJSON, taskJSON, task.CreatedAt.UnixMilli()); err != nil {
+			return fmt.Errorf("persist queued task: %w", err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit queued tasks: %w", err)
 	}
 	return nil
 }
@@ -79,7 +128,7 @@ func (s *queueStore) remove(id string) error {
 }
 
 func (s *queueStore) load() ([]*WebTask, error) {
-	rows, err := s.db.Query("SELECT id, request_json, created_at FROM pending_tasks ORDER BY created_at, id")
+	rows, err := s.db.Query("SELECT id, request_json, task_json, created_at FROM pending_tasks ORDER BY created_at, id")
 	if err != nil {
 		return nil, fmt.Errorf("load queued tasks: %w", err)
 	}
@@ -90,13 +139,18 @@ func (s *queueStore) load() ([]*WebTask, error) {
 		var (
 			task        WebTask
 			requestJSON []byte
+			taskJSON    []byte
 			createdAt   int64
 		)
-		if err := rows.Scan(&task.ID, &requestJSON, &createdAt); err != nil {
+		if err := rows.Scan(&task.ID, &requestJSON, &taskJSON, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan queued task: %w", err)
 		}
-		if err := json.Unmarshal(requestJSON, &task.Request); err != nil {
-			return nil, fmt.Errorf("decode queued task %s: %w", task.ID, err)
+		if len(taskJSON) > 0 {
+			if err := json.Unmarshal(taskJSON, &task); err != nil {
+				return nil, fmt.Errorf("decode queued task %s: %w", task.ID, err)
+			}
+		} else if err := json.Unmarshal(requestJSON, &task.Request); err != nil {
+			return nil, fmt.Errorf("decode legacy queued task %s: %w", task.ID, err)
 		}
 		task.Status = "queued"
 		task.CreatedAt = time.UnixMilli(createdAt).UTC()
@@ -105,5 +159,11 @@ func (s *queueStore) load() ([]*WebTask, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate queued tasks: %w", err)
 	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].BatchID != "" && tasks[i].BatchID == tasks[j].BatchID {
+			return tasks[i].QueueIndex < tasks[j].QueueIndex
+		}
+		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+	})
 	return tasks, nil
 }

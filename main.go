@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -693,11 +694,11 @@ func buildFFmpegArgs(ffmpegPath, inPath, outPath, targetFmt, extraArgs string) (
 	case "flac":
 		// FLAC stores cover art in a PICTURE metadata block. FFmpeg represents it
 		// as an attached video stream, so map the optional artwork explicitly.
-		args = append(args, "-map", "0:a:0", "-map", "0:v?", "-c:a", "flac", "-c:v", "copy", "-disposition:v", "attached_pic")
+		args = append(args, "-map", "0:a:0", "-map", "0:v?", "-c:a", "flac", "-c:v", "copy", "-disposition:v:0", "attached_pic", "-metadata:s:v:0", "title=Album cover", "-metadata:s:v:0", "comment=Cover (front)")
 	case "mp3":
 		// ID3v2 supports both an APIC cover and a USLT lyrics frame. Metadata is
 		// copied above; explicitly map the optional artwork into the ID3 tag.
-		args = append(args, "-map", "0:a:0", "-map", "0:v?", "-c:a", "libmp3lame", "-qscale:a", "2", "-c:v", "copy", "-id3v2_version", "3", "-disposition:v", "attached_pic", "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)")
+		args = append(args, "-map", "0:a:0", "-map", "0:v?", "-c:a", "libmp3lame", "-qscale:a", "2", "-c:v", "copy", "-id3v2_version", "3", "-disposition:v:0", "attached_pic", "-metadata:s:v:0", "title=Album cover", "-metadata:s:v:0", "comment=Cover (front)")
 	case "opus":
 		// Ogg/Opus keeps lyrics as a Vorbis comment, but its muxer does not
 		// reliably support an attached picture stream.
@@ -1031,7 +1032,11 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 			return
 		}
 		//边下载边解密
-		err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config, reportNativeProgress)
+		runContext := activeNativeContext
+		if runContext == nil {
+			runContext = context.Background()
+		}
+		err = runv2.Run(runContext, track.ID, trackM3u8Url, trackPath, Config, reportNativeProgress)
 		if err != nil {
 			fmt.Println("Failed to run v2:", err)
 			recordNativeError(fmt.Errorf("音频解密失败: %w", err))
@@ -1048,8 +1053,19 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
 			track.CoverPath, err = writeCover(track.SaveDir, track.ID, track.Resp.Attributes.Artwork.URL)
 			if err != nil {
-				fmt.Println("Failed to write cover.")
+				coverErr := fmt.Errorf("failed to download track artwork: %w", err)
+				fmt.Println(coverErr)
+				recordNativeError(fmt.Errorf("歌曲封面获取失败: %w", err))
+				counter.Error++
+				return
 			}
+		}
+		if track.CoverPath == "" {
+			coverErr := errors.New("track artwork path is empty")
+			fmt.Println(coverErr)
+			recordNativeError(errors.New("歌曲封面获取失败：封面路径为空"))
+			counter.Error++
+			return
 		}
 		tags = append(tags, fmt.Sprintf("cover=%s", track.CoverPath))
 	}
@@ -1597,7 +1613,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 	return nil
 
 }
-func ripPlaylist(playlistId string, token string, storefront string, mediaUserToken string) error {
+func ripPlaylist(playlistId string, token string, storefront string, mediaUserToken string, selectedTrackID string) error {
 	playlist := task.NewPlaylist(storefront, playlistId)
 	err := playlist.GetResp(token, Config.Language)
 	if err != nil {
@@ -1819,7 +1835,17 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 	}
 	var selected []int
 
-	if !dl_select {
+	if selectedTrackID != "" {
+		for index := range playlist.Tracks {
+			if playlist.Tracks[index].ID == selectedTrackID {
+				selected = []int{index + 1}
+				break
+			}
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("playlist track %s not found", selectedTrackID)
+		}
+	} else if !dl_select {
 		selected = arr
 	} else {
 		selected = playlist.ShowSelect()
@@ -2150,7 +2176,7 @@ func main() {
 			} else if strings.Contains(urlRaw, "/playlist/") {
 				fmt.Println("Playlist")
 				storefront, albumId = checkUrlPlaylist(urlRaw)
-				err := ripPlaylist(albumId, token, storefront, Config.MediaUserToken)
+				err := ripPlaylist(albumId, token, storefront, Config.MediaUserToken, "")
 				if err != nil {
 					fmt.Println("Failed to rip playlist:", err)
 				}
@@ -2595,7 +2621,6 @@ func extractMedia(b string, more_mode bool) (string, string, error) {
 		return "", "", nil
 	}
 	var Quality string
-	fmt.Printf("%+v\n", Config)
 	fmt.Println("===== SELECTOR =====")
 	for _, variant := range master.Variants {
 		fmt.Printf("Codec=%q Audio=%q AvgBW=%d BW=%d\n",

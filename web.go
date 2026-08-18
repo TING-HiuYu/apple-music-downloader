@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"main/utils/ampapi"
 	"main/utils/httputil"
 	"main/utils/structs"
 )
@@ -39,8 +40,6 @@ type DownloadRequest struct {
 	AtmosMax         int      `json:"atmosMax"`
 	ConvertFormat    string   `json:"convertFormat"`
 	KeepOriginal     bool     `json:"keepOriginal"`
-	SaveLyrics       bool     `json:"saveLyrics"`
-	EmbedLyrics      bool     `json:"embedLyrics"`
 	EmbedCover       bool     `json:"embedCover"`
 	SaveM3U8Playlist bool     `json:"saveM3U8Playlist"`
 }
@@ -67,6 +66,23 @@ type Downloader interface {
 	Download(context.Context, DownloadRequest, ProgressReporter) ([]AddedTrack, error)
 }
 
+type PlaylistResolver interface {
+	ResolvePlaylist(context.Context, string) (ResolvedPlaylist, error)
+}
+
+type ResolvedPlaylist struct {
+	Title  string
+	Tracks []ResolvedPlaylistTrack
+}
+
+type ResolvedPlaylistTrack struct {
+	URL      string
+	Title    string
+	Artist   string
+	Position int
+	Total    int
+}
+
 type NativeDownloader struct {
 	mu         sync.Mutex
 	baseConfig structs.ConfigSet
@@ -76,8 +92,63 @@ func NewNativeDownloader(config structs.ConfigSet) *NativeDownloader {
 	return &NativeDownloader{baseConfig: config}
 }
 
+func (d *NativeDownloader) ResolvePlaylist(ctx context.Context, rawURL string) (ResolvedPlaylist, error) {
+	select {
+	case <-ctx.Done():
+		return ResolvedPlaylist{}, ctx.Err()
+	default:
+	}
+	storefront, playlistID := checkUrlPlaylist(rawURL)
+	if storefront == "" || playlistID == "" {
+		return ResolvedPlaylist{}, errors.New("invalid playlist URL")
+	}
+	token, err := ampapi.GetToken()
+	if err != nil {
+		configured := strings.TrimSpace(d.baseConfig.AuthorizationToken)
+		if configured == "" || configured == "your-authorization-token" {
+			return ResolvedPlaylist{}, fmt.Errorf("resolve Apple Music authorization token: %w", err)
+		}
+		token = strings.TrimPrefix(configured, "Bearer ")
+	}
+	response, err := ampapi.GetPlaylistResp(storefront, playlistID, d.baseConfig.Language, token)
+	if err != nil {
+		return ResolvedPlaylist{}, fmt.Errorf("resolve playlist: %w", err)
+	}
+	if len(response.Data) == 0 {
+		return ResolvedPlaylist{}, errors.New("playlist contains no catalog data")
+	}
+	playlistURL, err := url.Parse(rawURL)
+	if err != nil {
+		return ResolvedPlaylist{}, fmt.Errorf("parse playlist URL: %w", err)
+	}
+	data := response.Data[0]
+	total := len(data.Relationships.Tracks.Data)
+	resolved := ResolvedPlaylist{Title: data.Attributes.Name, Tracks: make([]ResolvedPlaylistTrack, 0, total)}
+	for index, track := range data.Relationships.Tracks.Data {
+		if strings.TrimSpace(track.ID) == "" {
+			continue
+		}
+		trackURL := *playlistURL
+		query := trackURL.Query()
+		query.Set("i", track.ID)
+		trackURL.RawQuery = query.Encode()
+		resolved.Tracks = append(resolved.Tracks, ResolvedPlaylistTrack{
+			URL:      trackURL.String(),
+			Title:    track.Attributes.Name,
+			Artist:   track.Attributes.ArtistName,
+			Position: index + 1,
+			Total:    total,
+		})
+	}
+	if len(resolved.Tracks) == 0 {
+		return ResolvedPlaylist{}, errors.New("playlist contains no downloadable tracks")
+	}
+	return resolved, nil
+}
+
 var activeNativeProgress ProgressReporter
 var activeNativeError error
+var activeNativeContext context.Context
 
 func reportNativeProgress(stage string, percent int) {
 	if activeNativeProgress != nil {
@@ -96,9 +167,11 @@ func (d *NativeDownloader) Download(ctx context.Context, request DownloadRequest
 	defer d.mu.Unlock()
 	activeNativeProgress = progress
 	activeNativeError = nil
+	activeNativeContext = ctx
 	defer func() {
 		activeNativeProgress = nil
 		activeNativeError = nil
+		activeNativeContext = nil
 	}()
 
 	select {
@@ -129,9 +202,18 @@ func (d *NativeDownloader) Download(ctx context.Context, request DownloadRequest
 		Config.ConvertFormat = request.ConvertFormat
 	}
 	Config.ConvertKeepOriginal = request.KeepOriginal
-	Config.SaveLrcFile = request.SaveLyrics
-	Config.EmbedLrc = request.EmbedLyrics
+	Config.SaveLrcFile = false
+	Config.EmbedLrc = false
 	Config.EmbedCover = request.EmbedCover
+	if request.EmbedCover {
+		// The web app embeds each track's own artwork. Apple Music's artwork URL
+		// performs the resize at the CDN, so the temporary image and the embedded
+		// picture are consistently capped at 1080x1080 instead of retaining the
+		// playlist artwork or the much larger configured CLI cover size.
+		Config.DlAlbumcoverForPlaylist = true
+		Config.CoverSize = "1080x1080"
+		Config.CoverFormat = "jpg"
+	}
 
 	dl_atmos = request.Quality == "atmos"
 	dl_aac = request.Quality == "aac"
@@ -261,7 +343,12 @@ func executeNativeURLs(ctx context.Context, inputURLs []string, token string) er
 			if storefront == "" || playlistID == "" {
 				err = errors.New("invalid playlist URL")
 			} else {
-				err = ripPlaylist(playlistID, token, storefront, Config.MediaUserToken)
+				parsed, parseErr := url.Parse(rawURL)
+				if parseErr != nil {
+					err = parseErr
+				} else {
+					err = ripPlaylist(playlistID, token, storefront, Config.MediaUserToken, parsed.Query().Get("i"))
+				}
 			}
 
 		case strings.Contains(rawURL, "/station/"):
@@ -286,6 +373,14 @@ func executeNativeURLs(ctx context.Context, inputURLs []string, token string) er
 type WebTask struct {
 	ID            string          `json:"id"`
 	Request       DownloadRequest `json:"request"`
+	Title         string          `json:"title,omitempty"`
+	Artist        string          `json:"artist,omitempty"`
+	Collection    string          `json:"collection,omitempty"`
+	CollectionID  string          `json:"collectionId,omitempty"`
+	BatchID       string          `json:"batchId,omitempty"`
+	QueueIndex    int             `json:"queueIndex,omitempty"`
+	TrackNumber   int             `json:"trackNumber,omitempty"`
+	TrackTotal    int             `json:"trackTotal,omitempty"`
 	Status        string          `json:"status"`
 	Progress      int             `json:"progress"`
 	Stage         string          `json:"stage,omitempty"`
@@ -309,24 +404,88 @@ type TaskFile struct {
 type taskManager struct {
 	mu         sync.RWMutex
 	tasks      map[string]*WebTask
+	controls   map[string]*taskControl
 	queue      chan string
 	downloader Downloader
+	resolver   PlaylistResolver
 	store      *queueStore
 }
 
-func newTaskManager(downloader Downloader, store *queueStore) (*taskManager, error) {
+type taskControl struct {
+	mu      sync.Mutex
+	paused  bool
+	resumed chan struct{}
+	cancel  context.CancelFunc
+}
+
+func newTaskControl(cancel context.CancelFunc) *taskControl {
+	return &taskControl{resumed: make(chan struct{}), cancel: cancel}
+}
+
+func (control *taskControl) pause() {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if control.paused {
+		return
+	}
+	control.paused = true
+	control.resumed = make(chan struct{})
+}
+
+func (control *taskControl) resume() {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if !control.paused {
+		return
+	}
+	control.paused = false
+	close(control.resumed)
+}
+
+func (control *taskControl) wait(ctx context.Context) error {
+	control.mu.Lock()
+	if !control.paused {
+		control.mu.Unlock()
+		return ctx.Err()
+	}
+	resumed := control.resumed
+	control.mu.Unlock()
+	select {
+	case <-resumed:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (control *taskControl) cancelDownload() {
+	control.mu.Lock()
+	if control.paused {
+		control.paused = false
+		close(control.resumed)
+	}
+	cancel := control.cancel
+	control.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func newTaskManager(downloader Downloader, resolver PlaylistResolver, store *queueStore) (*taskManager, error) {
 	pending, err := store.load()
 	if err != nil {
 		return nil, err
 	}
-	queueSize := 128
+	queueSize := 4096
 	if len(pending)+1 > queueSize {
 		queueSize = len(pending) + 1
 	}
 	m := &taskManager{
 		tasks:      make(map[string]*WebTask),
+		controls:   make(map[string]*taskControl),
 		queue:      make(chan string, queueSize),
 		downloader: downloader,
+		resolver:   resolver,
 		store:      store,
 	}
 	for _, task := range pending {
@@ -337,7 +496,7 @@ func newTaskManager(downloader Downloader, store *queueStore) (*taskManager, err
 	return m, nil
 }
 
-func (m *taskManager) create(request DownloadRequest) (*WebTask, error) {
+func (m *taskManager) create(request DownloadRequest) ([]*WebTask, error) {
 	if strings.TrimSpace(request.OutputPath) == "" {
 		return nil, errors.New("请先选择下载目录")
 	}
@@ -370,21 +529,79 @@ func (m *taskManager) create(request DownloadRequest) (*WebTask, error) {
 		request.Quality = "alac"
 	}
 
-	task := &WebTask{
+	tasks, err := expandDownloadTasks(context.Background(), request, m.resolver)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.store.enqueueMany(tasks); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	for _, task := range tasks {
+		m.tasks[task.ID] = task
+	}
+	m.mu.Unlock()
+	for _, task := range tasks {
+		m.queue <- task.ID
+	}
+	result := make([]*WebTask, 0, len(tasks))
+	for _, task := range tasks {
+		result = append(result, cloneTask(task))
+	}
+	return result, nil
+}
+
+func expandDownloadTasks(ctx context.Context, request DownloadRequest, resolver PlaylistResolver) ([]*WebTask, error) {
+	createdAt := time.Now().UTC()
+	batchID := randomID()
+	tasks := make([]*WebTask, 0, len(request.URLs))
+	for _, rawURL := range request.URLs {
+		if !strings.Contains(rawURL, "/playlist/") {
+			taskRequest := request
+			taskRequest.URLs = []string{rawURL}
+			task := newQueuedTask(taskRequest, createdAt)
+			task.BatchID = batchID
+			task.QueueIndex = len(tasks) + 1
+			tasks = append(tasks, task)
+			continue
+		}
+		if resolver == nil {
+			return nil, errors.New("playlist expansion is unavailable")
+		}
+		playlist, err := resolver.ResolvePlaylist(ctx, rawURL)
+		if err != nil {
+			return nil, err
+		}
+		collectionID := randomID()
+		for _, track := range playlist.Tracks {
+			trackRequest := request
+			trackRequest.URLs = []string{track.URL}
+			task := newQueuedTask(trackRequest, createdAt)
+			task.Title = track.Title
+			task.Artist = track.Artist
+			task.Collection = playlist.Title
+			task.CollectionID = collectionID
+			task.BatchID = batchID
+			task.QueueIndex = len(tasks) + 1
+			task.TrackNumber = track.Position
+			task.TrackTotal = track.Total
+			tasks = append(tasks, task)
+		}
+	}
+	if len(tasks) == 0 {
+		return nil, errors.New("no downloadable tasks were resolved")
+	}
+	return tasks, nil
+}
+
+func newQueuedTask(request DownloadRequest, createdAt time.Time) *WebTask {
+	return &WebTask{
 		ID:        randomID(),
 		Request:   request,
 		Status:    "queued",
 		Progress:  0,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: createdAt,
 	}
-	if err := m.store.enqueue(task); err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	m.tasks[task.ID] = task
-	m.mu.Unlock()
-	m.queue <- task.ID
-	return cloneTask(task), nil
 }
 
 func (m *taskManager) worker() {
@@ -396,6 +613,11 @@ func (m *taskManager) worker() {
 			m.mu.Unlock()
 			continue
 		}
+		if task.Status != "queued" {
+			m.mu.Unlock()
+			continue
+		}
+		request := task.Request
 		if err := m.store.remove(id); err != nil {
 			ended := time.Now().UTC()
 			task.Status = "failed"
@@ -411,7 +633,9 @@ func (m *taskManager) worker() {
 		task.StageProgress = 0
 		task.Message = "下载中 (0%)"
 		task.StartedAt = &now
-		request := task.Request
+		downloadContext, cancelDownload := context.WithCancel(context.Background())
+		control := newTaskControl(cancelDownload)
+		m.controls[id] = control
 		stagingDirectory := filepath.Join(downloadStagingRoot(), id)
 		request.OutputPath = stagingDirectory
 		m.mu.Unlock()
@@ -421,9 +645,13 @@ func (m *taskManager) worker() {
 			m.finish(id, nil, fmt.Errorf("创建下载暂存目录: %w", mkdirErr))
 			continue
 		}
-		_, err := m.downloader.Download(context.Background(), request, func(stage string, percent int) {
+		_, err := m.downloader.Download(downloadContext, request, func(stage string, percent int) {
+			if control.wait(downloadContext) != nil {
+				return
+			}
 			m.updateProgress(id, stage, percent)
 		})
+		cancelDownload()
 		var files []TaskFile
 		if err == nil {
 			// Artwork is downloaded only as a temporary source for media tags. The
@@ -454,12 +682,7 @@ func validateEmbeddingCompatibility(request DownloadRequest) error {
 		return errors.New("Opus 不支持可靠地内嵌封面，请关闭内嵌封面或选择 FLAC/MP3")
 	}
 	if format == "wav" {
-		switch {
-		case request.EmbedLyrics && request.EmbedCover:
-			return errors.New("WAV 不支持可靠地内嵌歌词和封面，请关闭内嵌选项或选择 FLAC/MP3")
-		case request.EmbedLyrics:
-			return errors.New("WAV 不支持可靠地内嵌歌词，请关闭内嵌歌词或选择 FLAC/MP3/Opus")
-		case request.EmbedCover:
+		if request.EmbedCover {
 			return errors.New("WAV 不支持可靠地内嵌封面，请关闭内嵌封面或选择 FLAC/MP3")
 		}
 	}
@@ -500,7 +723,15 @@ func (m *taskManager) finish(id string, files []TaskFile, err error) {
 	}
 	task.EndedAt = &ended
 	task.Files = files
-	if err != nil {
+	delete(m.controls, id)
+	if task.Status == "canceling" || errors.Is(err, context.Canceled) {
+		delete(m.tasks, id)
+		m.mu.Unlock()
+		if removeErr := m.store.remove(id); removeErr != nil {
+			log.Printf("remove canceled task %s from queue database: %v", id, removeErr)
+		}
+		return
+	} else if err != nil {
 		task.Status = "failed"
 		task.Stage = "failed"
 		task.Message = err.Error()
@@ -512,6 +743,116 @@ func (m *taskManager) finish(id string, files []TaskFile, err error) {
 		task.Message = ""
 	}
 	m.mu.Unlock()
+}
+
+func (m *taskManager) pause(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task := m.tasks[id]
+	if task == nil {
+		return errors.New("task not found")
+	}
+	if task.Status == "paused" {
+		return nil
+	}
+	if task.Status != "running" {
+		return errors.New("只有正在下载或解密的任务可以暂停")
+	}
+	control := m.controls[id]
+	if control == nil {
+		return errors.New("任务暂时无法暂停")
+	}
+	control.pause()
+	task.Status = "paused"
+	task.Message = pausedTaskMessage(task)
+	return nil
+}
+
+func (m *taskManager) resume(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task := m.tasks[id]
+	if task == nil {
+		return errors.New("task not found")
+	}
+	if task.Status == "running" {
+		return nil
+	}
+	if task.Status != "paused" {
+		return errors.New("只有已暂停的任务可以继续")
+	}
+	control := m.controls[id]
+	if control == nil {
+		return errors.New("任务暂时无法继续")
+	}
+	task.Status = "running"
+	switch task.Stage {
+	case "decrypt":
+		task.Message = fmt.Sprintf("解密中 (%d%%)", task.StageProgress)
+	default:
+		task.Message = fmt.Sprintf("下载中 (%d%%)", task.StageProgress)
+	}
+	control.resume()
+	return nil
+}
+
+func (m *taskManager) cancel(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task := m.tasks[id]
+	if task == nil {
+		return errors.New("task not found")
+	}
+	if task.Status == "canceled" || task.Status == "canceling" {
+		return nil
+	}
+	if task.Status != "running" && task.Status != "paused" {
+		return errors.New("只有正在下载、解密或已暂停的任务可以取消")
+	}
+	control := m.controls[id]
+	if control == nil {
+		return errors.New("任务暂时无法取消")
+	}
+	task.Status = "canceling"
+	task.Message = "正在取消"
+	control.cancelDownload()
+	return nil
+}
+
+func (m *taskManager) cancelAll() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	canceled := 0
+	for id, task := range m.tasks {
+		switch task.Status {
+		case "queued":
+			if err := m.store.remove(id); err != nil {
+				return canceled, err
+			}
+			delete(m.tasks, id)
+			canceled++
+		case "running", "paused":
+			control := m.controls[id]
+			if control == nil {
+				return canceled, fmt.Errorf("任务 %s 暂时无法取消", id)
+			}
+			task.Status = "canceling"
+			task.Message = "正在取消"
+			control.cancelDownload()
+			canceled++
+		}
+	}
+	return canceled, nil
+}
+
+func pausedTaskMessage(task *WebTask) string {
+	switch task.Stage {
+	case "decrypt":
+		return fmt.Sprintf("已暂停 · 解密中 (%d%%)", task.StageProgress)
+	default:
+		return fmt.Sprintf("已暂停 · 下载中 (%d%%)", task.StageProgress)
+	}
 }
 
 func containsMediaFile(files []TaskFile) bool {
@@ -531,7 +872,12 @@ func (m *taskManager) list() []*WebTask {
 	for _, task := range m.tasks {
 		items = append(items, cloneTask(task))
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].BatchID != "" && items[i].BatchID == items[j].BatchID {
+			return items[i].QueueIndex < items[j].QueueIndex
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
 	return items
 }
 
@@ -751,7 +1097,8 @@ func startWebServer(address string) error {
 	if err != nil {
 		return err
 	}
-	manager, err := newTaskManager(NewNativeDownloader(Config), store)
+	downloader := NewNativeDownloader(Config)
+	manager, err := newTaskManager(downloader, downloader, store)
 	if err != nil {
 		return err
 	}
@@ -813,7 +1160,6 @@ func startWebServer(address string) error {
 	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"outputPath":                   Config.AlacSaveFolder,
-			"mediaUserTokenConfigured":     len(Config.MediaUserToken) > 50,
 			"authorizationTokenConfigured": Config.AuthorizationToken != "" && Config.AuthorizationToken != "your-authorization-token",
 			"proxyConfigured":              Config.Proxy != "",
 			"language":                     Config.Language,
@@ -832,12 +1178,20 @@ func startWebServer(address string) error {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		task, err := manager.create(request)
+		tasks, err := manager.create(request)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusAccepted, task)
+		writeJSON(w, http.StatusAccepted, map[string]any{"tasks": tasks})
+	})
+	mux.HandleFunc("POST /api/tasks/cancel-all", func(w http.ResponseWriter, _ *http.Request) {
+		count, err := manager.cancelAll()
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"canceled": count})
 	})
 	mux.HandleFunc("GET /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
 		task, ok := manager.get(r.PathValue("id"))
@@ -845,6 +1199,30 @@ func startWebServer(address string) error {
 			writeError(w, http.StatusNotFound, errors.New("task not found"))
 			return
 		}
+		writeJSON(w, http.StatusOK, task)
+	})
+	mux.HandleFunc("POST /api/tasks/{id}/pause", func(w http.ResponseWriter, r *http.Request) {
+		if err := manager.pause(r.PathValue("id")); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		task, _ := manager.get(r.PathValue("id"))
+		writeJSON(w, http.StatusOK, task)
+	})
+	mux.HandleFunc("POST /api/tasks/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+		if err := manager.resume(r.PathValue("id")); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		task, _ := manager.get(r.PathValue("id"))
+		writeJSON(w, http.StatusOK, task)
+	})
+	mux.HandleFunc("POST /api/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := manager.cancel(r.PathValue("id")); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		task, _ := manager.get(r.PathValue("id"))
 		writeJSON(w, http.StatusOK, task)
 	})
 	mux.HandleFunc("GET /api/tasks/{id}/files/{fileID}", func(w http.ResponseWriter, r *http.Request) {

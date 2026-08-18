@@ -15,7 +15,9 @@
 - 参考 [wenfeng110402/AppleMusic-Downloader](https://github.com/wenfeng110402/AppleMusic-Downloader)
   设计的本地 Web 界面。
 - 原生 Go HTTP API：任务直接调用已有的 Go 下载函数，不把 CLI 当作子进程运行。
-- 使用 SQLite 保存待执行任务，当前按顺序一次执行一个任务。
+- 使用 SQLite 保存待执行任务，当前按顺序一次执行一个任务；播放列表会在下载前解析成
+  每首曲目一条、可读性更高的队列任务；运行中的任务可暂停和继续，也可一次取消并从
+  页面与 SQLite 中移除全部未完成任务。
 - 下载结果通过浏览器传给用户，因此容器不需要挂载宿主机下载目录。
 - 在前端完成 Wrapper 登录、Apple 双重验证最终六位码输入、状态反馈和登出；本应用
   不持久化账号密码或验证码。
@@ -35,7 +37,8 @@
           ↕ 仅通过宿主机回环地址访问
 Go Web/API 服务
   ├─ Wrapper 生命周期与状态管理
-  ├─ SQLite 待执行队列（串行执行）
+  ├─ 播放列表解析器 → 每首曲目一条 SQLite 记录
+  ├─ SQLite 待执行队列（串行执行、命名卷持久化）
   ├─ 项目已有的 Go 下载函数
   └─ 已完成文件的临时中转区
           ├─ Wrapper：Apple Music 登录与解密服务
@@ -43,9 +46,10 @@ Go Web/API 服务
           └─ FFmpeg：解码、转码、字幕和编解码器
 ```
 
-上游 CLI 的下载逻辑包含包级共享状态，因此 Web 任务有意采用串行执行。任务开始执行
-时就会从 SQLite 中删除；执行进度、成功记录和失败记录只保存在内存中，SQLite 不用于
-缓存进度。
+上游 CLI 的下载逻辑包含包级共享状态，因此 Web 任务有意采用串行执行。提交播放列表
+时会先解析全部分页曲目，每首歌分别保存标题、艺人、播放列表序号和一条待执行 SQLite
+记录。任务开始执行时就会从 SQLite 中删除；执行进度、成功记录和失败记录只保存在
+内存中，SQLite 不用于缓存进度。
 
 完成的文件只在容器临时目录中保留到浏览器接收为止。API 使用不透明文件 ID，不会把
 容器内路径暴露给前端。
@@ -64,16 +68,21 @@ Web 端口只发布到 `127.0.0.1`。请勿把它部署到公网：它的设计�
 
 ### Docker Desktop / Docker 命令行（推荐）
 
-不需要 Compose，也不需要挂载任何宿主机目录：
+不需要 Compose，也不需要绑定任何宿主机目录。先创建两个 Docker 命名卷，让待执行
+队列和 Wrapper 登录会话在容器替换后继续保留：
 
 ```sh
 docker pull ghcr.io/ting-hiuyu/apple-music-downloader:latest
+docker volume create apple-music-downloader-queue
+docker volume create apple-music-downloader-wrapper
 
 docker run -d \
   --name apple-music-downloader \
   --restart unless-stopped \
   --privileged \
   -p 127.0.0.1:8080:8080 \
+  --mount source=apple-music-downloader-queue,target=/app/data \
+  --mount source=apple-music-downloader-wrapper,target=/opt/wrapper/rootfs/data/data/com.apple.android.music/files \
   ghcr.io/ting-hiuyu/apple-music-downloader:latest
 ```
 
@@ -95,8 +104,15 @@ docker stop apple-music-downloader
 docker rm apple-music-downloader
 ```
 
-由于默认部署有意不创建 volume，删除并重新创建容器时，待执行 SQLite 队列和 Wrapper
-会话也会一并删除。
+删除或重新创建容器不会删除这两个命名卷。第一个保存 `/app/data/queue.db`；第二个保存
+Wrapper 的 `kvs.sqlitedb`、Cookie、账号数据库及对应 WAL 文件。Wrapper 命名卷包含
+敏感的本地登录会话数据，应限制访问。
+
+如果确实需要清空队列和登录状态，请先删除容器，再执行：
+
+```sh
+docker volume rm apple-music-downloader-queue apple-music-downloader-wrapper
+```
 
 ### Docker Compose
 
@@ -112,8 +128,9 @@ docker compose up -d --build
 AMDL_PORT=8088 docker compose up -d --build
 ```
 
-项目提供的 Compose 文件同样只绑定 `127.0.0.1`、启用特权模式，而且不挂载宿主机
-目录、命名卷或 Docker Secrets。
+项目提供的 Compose 文件同样只绑定 `127.0.0.1`、启用特权模式，并自动创建
+`apple-music-downloader-queue` 与 `apple-music-downloader-wrapper` 两个命名卷；不会
+挂载宿主机目录或 Docker Secrets。
 
 ### 本地构建多架构镜像
 
@@ -161,6 +178,9 @@ go run . --web --listen 127.0.0.1:8080
 4. 添加 Apple Music 链接，选择 ALAC/Atmos/AAC 和可选的转换格式，再提交任务。
 5. 选择“下载目录”时由浏览器接管下载；选择“其他位置”时，可在兼容浏览器中指定目录。
 
+提交播放列表 URL 时，API 会先解析全部目录分页并为每首曲目创建独立任务。任务列表会
+显示曲目名、艺人、播放列表名称和 `3/24` 这样的曲目位置，随后仍按顺序逐首下载。
+
 Wrapper 能接收最终验证码，但没有提供让本项目选择 Apple 验证码发送方式、受信任设备
 或手机号的接口。
 
@@ -174,8 +194,11 @@ Wrapper 能接收最终验证码，但没有提供让本项目选择 Apple 验�
   足够权限的进程可能短暂看到这些参数。认证完成后，后端会停止该进程，并在不携带
   登录参数的情况下重新启动 Wrapper。
 - 六位验证码只会以 `0600` 权限写入 Wrapper 要求的运行时文件，不会存入 SQLite。
-- SQLite 只保存待执行队列，不缓存进度。
-- 默认 Docker 部署没有 volume；会话、队列和中转文件都位于容器可写层。
+- SQLite 只保存待执行队列，播放列表的每首曲目是独立记录；不会缓存执行进度、成功
+  历史或失败历史。
+- 队列命名卷保存 `/app/data/queue.db`；Wrapper 命名卷保存 `kvs.sqlitedb` 及保持登录
+  所需的其他上游会话文件。本应用仍然不会保存账号密码或六位验证码。
+- 下载完成文件的中转目录仍是临时目录，不会写入上述两个命名卷。
 - “下载目录”由浏览器自己的下载设置决定；“其他位置”由浏览器授权页面获取目录句柄，
   再把每个流式文件写入该目录。
 
@@ -189,6 +212,8 @@ Wrapper 能接收最终验证码，但没有提供让本项目选择 Apple 验�
 | `WRAPPER_AMD64_URL` | AMD64 Wrapper ZIP | `Wrapper.x86_64.latest` |
 | `WRAPPER_SHA256` | 可选的 Wrapper 文件校验 | 空 |
 | `AMDL_PORT` | Compose 发布到宿主机的端口 | `8080` |
+| `AMDL_QUEUE_VOLUME` | Compose 队列命名卷名称 | `apple-music-downloader-queue` |
+| `AMDL_WRAPPER_VOLUME` | Compose Wrapper 命名卷名称 | `apple-music-downloader-wrapper` |
 | `WRAPPER_DISABLED=1` | 开发 UI/API 时禁用 Wrapper | `0` |
 
 Wrapper 的 `latest` release 标签会变化。需要可复现构建时，请镜像保存已知 ZIP，或通过

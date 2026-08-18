@@ -62,8 +62,6 @@
               </div>
 
               <div class="toggle-row">
-                <label><input id="embed-lyrics" type="checkbox" checked><span></span>内嵌歌词</label>
-                <label><input id="save-lyrics" type="checkbox"><span></span>保存歌词文件</label>
                 <label><input id="embed-cover" type="checkbox" checked><span></span>内嵌封面</label>
               </div>
 
@@ -75,7 +73,7 @@
 
         <section id="view-queue" class="view">
           <div class="content narrow">
-            <div class="section-head"><div><p class="eyebrow">DOWNLOAD ACTIVITY</p><h2>任务队列</h2></div><button id="refresh-tasks" class="secondary-button" type="button">刷新</button></div>
+            <div class="section-head"><div><p class="eyebrow">DOWNLOAD ACTIVITY</p><h2>任务队列</h2></div><div class="section-actions"><button id="toggle-active-task" class="secondary-button" type="button" hidden>暂停</button><button id="cancel-all-tasks" class="secondary-button danger-button" type="button" hidden>取消全部</button><button id="refresh-tasks" class="secondary-button" type="button">刷新</button></div></div>
             <div id="task-list" class="task-list"><div class="empty-state"><span>♪</span><h3>还没有下载任务</h3><p>从“新建下载”添加 Apple Music 链接。</p></div></div>
           </div>
         </section>
