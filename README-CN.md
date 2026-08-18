@@ -133,8 +133,12 @@ chmod +x scripts/build-images.sh
 IMAGE=ghcr.io/owner/apple-music-downloader PUSH=1 ./scripts/build-images.sh
 ```
 
-推送到 `main` 时，项目内置 GitHub Actions 也会自动构建并发布 `linux/amd64`、
-`linux/arm64` 镜像到 GHCR，同时生成 `latest` 和 commit SHA 标签。
+发布时会先分别生成单架构的 `:amd64` 和 `:arm64` 镜像，再创建同时指向两者的
+多架构 `:latest` 索引。普通用户拉取 `:latest` 时，Docker 仍然只会自动下载与宿主机
+匹配的那一个架构。
+
+推送到 `main` 时，项目内置 GitHub Actions 也会把两个单架构标签、不可变的
+commit-架构标签，以及自动识别架构的 `latest` 和 commit SHA 索引发布到 GHCR。
 
 ### 从 Go 源码运行
 
@@ -180,6 +184,7 @@ Wrapper 能接收最终验证码，但没有提供让本项目选择 Apple 验�
 | 参数 | 用途 | 默认值 |
 | --- | --- | --- |
 | `GPAC_REF` | 为各目标架构编译的 GPAC stable Git 标签 | `v26.07.0` |
+| `FFMPEG_VERSION` | 为各目标架构源码编译的 FFmpeg 版本 | `6.1.6` |
 | `WRAPPER_ARM64_URL` | ARM64 Wrapper ZIP | `Wrapper.arm64.latest` |
 | `WRAPPER_AMD64_URL` | AMD64 Wrapper ZIP | `Wrapper.x86_64.latest` |
 | `WRAPPER_SHA256` | 可选的 Wrapper 文件校验 | 空 |
@@ -188,6 +193,11 @@ Wrapper 能接收最终验证码，但没有提供让本项目选择 Apple 验�
 
 Wrapper 的 `latest` release 标签会变化。需要可复现构建时，请镜像保存已知 ZIP，或通过
 `WRAPPER_SHA256` 提供当前文件的 SHA-256。
+
+运行镜像只保留 strip 后的 FFmpeg/GPAC 动态二进制和运行库；头文件、静态库、
+pkg-config 文件与编译缓存均不会进入最终镜像。GPAC 的桌面播放和设备输出模块已关闭，
+但 MP4Box、容器读写、编解码器、字幕、OpenJPEG、FLAC/MP3/Opus/WAV 转换以及 FFmpeg
+分析滤镜仍然可用。
 
 更多镜像细节见 [DOCKER-BUILD.md](DOCKER-BUILD.md)。
 

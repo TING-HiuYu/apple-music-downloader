@@ -1,14 +1,17 @@
 # Multi-architecture container
 
 The image contains the Go web/API service, a target-native Wrapper release,
-GPAC compiled from a stable tag, FFmpeg and the media development libraries
-used to enable FFmpeg filters, subtitles, OpenJPEG, audio codecs and GPAC I/O.
+headless GPAC compiled from a stable tag, and a target-native FFmpeg build with
+software decoding, transcoding, subtitles, OpenJPEG and audio analysis support.
+Development packages and compiler output remain in builder stages only.
 
 ## Image layout
 
 ```text
+ffmpeg-builder (linux/amd64 or linux/arm64)
+  -> builds shared FFmpeg and validates codecs, subtitles and spectrum filters
 gpac-builder (linux/amd64 or linux/arm64)
-  -> builds GPAC and validates MP4Box + ffdmx
+  -> builds headless GPAC against that FFmpeg and validates MP4Box + filters
 wrapper-fetcher (build host)
   -> selects Wrapper.x86_64.latest or Wrapper.arm64.latest
 go-builder (build host)
@@ -37,11 +40,24 @@ To publish one multi-platform manifest:
 IMAGE=ghcr.io/owner/apple-music-downloader PUSH=1 ./scripts/build-images.sh
 ```
 
-Override the pinned GPAC release when upgrading:
+The publish path pushes two inspectable single-platform tags first:
+`amd64` and `arm64`. It then creates the lightweight `latest` image index that
+references both. A normal `docker pull ...:latest` still selects only the image
+matching the host architecture; users may also pull an architecture tag
+explicitly.
+
+Override the pinned GPAC or FFmpeg release when upgrading:
 
 ```sh
-GPAC_REF=v26.07.0 ./scripts/build-images.sh
+GPAC_REF=v26.07.0 FFMPEG_VERSION=6.1.6 ./scripts/build-images.sh
 ```
+
+The runtime image deliberately omits GPAC/FFmpeg headers, static libraries,
+pkg-config files, build caches and desktop playback stacks (OpenGL, Mesa/LLVM,
+SDL, Caca, Jack, Pulse and ALSA output). File demuxing/muxing, MP4Box metadata,
+FFmpeg codec filters, subtitles, OpenJPEG and all downloader conversion formats
+remain enabled. This is suitable for the container's server-side workload, but
+the image is not intended to be a desktop media player or capture workstation.
 
 ## First run
 
@@ -127,6 +143,7 @@ compatible local Chromium browser or a desktop app WebView with the same API.
 ## Important build inputs
 
 - `GPAC_REF`: stable GPAC Git tag. It is pinned so builds remain reproducible.
+- `FFMPEG_VERSION`: FFmpeg release compiled for each target architecture.
 - `WRAPPER_ARM64_URL` and `WRAPPER_AMD64_URL`: mutable `latest` release assets.
 - `WRAPPER_SHA256`: optional checksum for controlled/reproducible builds.
 - `WRAPPER_DISABLED=1`: starts only the web/Go service for UI or API testing.

@@ -143,8 +143,13 @@ To publish a multi-platform manifest:
 IMAGE=ghcr.io/owner/apple-music-downloader PUSH=1 ./scripts/build-images.sh
 ```
 
-Pushes to `main` also trigger the included GitHub Actions workflow, publishing
-`linux/amd64` and `linux/arm64` images to GHCR with `latest` and commit-SHA tags.
+Publishing creates `:amd64` and `:arm64` as separate single-platform images,
+then creates `:latest` as a multi-platform index pointing to both. Docker pulls
+only the matching architecture from `:latest` automatically.
+
+Pushes to `main` also trigger the included GitHub Actions workflow. GHCR receives
+the architecture tags, immutable commit-and-architecture tags, and automatic
+multi-platform `latest` and commit-SHA indexes.
 
 ### Run from Go source
 
@@ -201,6 +206,7 @@ Allow it if you selected browser Downloads.
 | Setting | Purpose | Default |
 | --- | --- | --- |
 | `GPAC_REF` | GPAC stable Git tag compiled for each target | `v26.07.0` |
+| `FFMPEG_VERSION` | FFmpeg release compiled for each target | `6.1.6` |
 | `WRAPPER_ARM64_URL` | ARM64 Wrapper release ZIP | `Wrapper.arm64.latest` |
 | `WRAPPER_AMD64_URL` | AMD64 Wrapper release ZIP | `Wrapper.x86_64.latest` |
 | `WRAPPER_SHA256` | Optional release checksum validation | empty |
@@ -209,6 +215,12 @@ Allow it if you selected browser Downloads.
 
 Wrapper's `latest` release tags are mutable. For controlled builds, mirror a
 known ZIP or pass its SHA-256 through `WRAPPER_SHA256`.
+
+The runtime keeps only stripped shared FFmpeg/GPAC binaries and runtime
+libraries. Headers, static archives, pkg-config files and build caches are
+discarded. GPAC desktop playback and device-output stacks are disabled, while
+MP4Box, container I/O, codecs, subtitles, OpenJPEG, FLAC/MP3/Opus/WAV
+conversion and FFmpeg analysis filters remain available.
 
 More image details are in [DOCKER-BUILD.md](DOCKER-BUILD.md).
 
