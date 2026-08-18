@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="description" content="Apple Music ALAC、Dolby Atmos 与 AAC 下载管理界面">
+    <title>AMDL Console</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script defer src="/app.js"></script>
+  </head>
+  <body class="auth-locked">
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">A</span>
+          <div><strong>AMDL</strong></div>
+        </div>
+
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="download"><span class="nav-icon">↓</span><span>新建下载</span></button>
+          <button class="nav-item" data-view="queue"><span class="nav-icon">≡</span><span>任务队列</span><b id="queue-count">0</b></button>
+          <button class="nav-item" data-view="system"><span class="nav-icon">◉</span><span>系统状态</span></button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="server-state"><i id="health-dot"></i><span id="health-text">正在连接后端</span></div>
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="切换明暗主题">◐</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="mobile-head">
+          <div class="brand"><span class="brand-mark">A</span><strong>AMDL</strong></div>
+          <button id="mobile-nav-toggle" class="icon-button" type="button" aria-label="打开导航">☰</button>
+        </header>
+
+        <section id="view-download" class="view active">
+          <div class="content download-layout">
+            <div class="headline">
+              <h1>带走。<br><span>不必带走 App。</span></h1>
+              <p>粘贴专辑、歌曲、播放列表、艺人或音乐视频链接；设置好格式和保存路径；开始下载。</p>
+            </div>
+
+            <form id="download-form" class="glass-card form-card">
+              <div class="card-topline"><span>创建任务</span><small>队列串行处理</small></div>
+              <label class="field-label" for="urls">Apple Music 链接 <span>每行一个</span></label>
+              <textarea id="urls" rows="5" required placeholder="https://music.apple.com/us/album/...&#10;https://music.apple.com/us/playlist/..."></textarea>
+
+              <fieldset>
+                <legend>下载音质</legend>
+                <div class="quality-grid">
+                  <label class="quality active"><input type="radio" name="quality" value="alac" checked><strong>ALAC</strong><small>无损 / Hi-Res</small></label>
+                  <label class="quality"><input type="radio" name="quality" value="atmos"><strong>Atmos</strong><small>Dolby / EC-3</small></label>
+                  <label class="quality"><input type="radio" name="quality" value="aac"><strong>AAC</strong><small>兼容 / 高效率</small></label>
+                </div>
+              </fieldset>
+
+              <div class="field-row">
+                <label><span class="field-label">保存位置</span><select id="download-destination"><option value="downloads">默认下载目录</option><option value="other">其他位置</option></select><p id="directory-name" class="directory-name"></p></label>
+                <label><span class="field-label">保存格式</span><select id="convert-format"><option value="none">保持原格式</option><option value="flac">FLAC</option><option value="mp3">MP3</option><option value="opus">Opus</option><option value="wav">WAV</option></select></label>
+              </div>
+
+              <div class="toggle-row">
+                <label><input id="embed-lyrics" type="checkbox" checked><span></span>内嵌歌词</label>
+                <label><input id="save-lyrics" type="checkbox"><span></span>保存歌词文件</label>
+                <label><input id="embed-cover" type="checkbox" checked><span></span>内嵌封面</label>
+              </div>
+
+              <div id="form-message" class="form-message" role="status"></div>
+              <button class="primary-button" type="submit"><span>加入下载队列</span><b>→</b></button>
+            </form>
+          </div>
+        </section>
+
+        <section id="view-queue" class="view">
+          <div class="content narrow">
+            <div class="section-head"><div><p class="eyebrow">DOWNLOAD ACTIVITY</p><h2>任务队列</h2></div><button id="refresh-tasks" class="secondary-button" type="button">刷新</button></div>
+            <div id="task-list" class="task-list"><div class="empty-state"><span>♪</span><h3>还没有下载任务</h3><p>从“新建下载”添加 Apple Music 链接。</p></div></div>
+          </div>
+        </section>
+
+        <section id="view-system" class="view">
+          <div class="content narrow">
+            <div class="section-head"><div><p class="eyebrow">RUNTIME & DEPENDENCIES</p><h2>系统状态</h2></div><button id="refresh-system" class="secondary-button" type="button">重新检测</button></div>
+            <div class="status-hero glass-card"><div><span class="pulse"></span><strong>下载服务</strong><p id="runtime-detail">正在读取运行环境…</p></div><span class="serial-badge">SQLITE QUEUE</span></div>
+            <div class="auth-card glass-card">
+              <div class="auth-copy"><span id="wrapper-auth-dot" class="auth-dot"></span><div><strong>凭据状态</strong><p id="wrapper-auth-detail">正在读取登录状态…</p></div></div>
+              <div class="auth-actions">
+                <button id="open-login" class="secondary-button" type="button">查看登录状态</button>
+                <button id="logout-wrapper" class="secondary-button danger-button" type="button" hidden>退出登录</button>
+              </div>
+            </div>
+            <h3 class="subheading">媒体工具</h3>
+            <div id="dependency-grid" class="dependency-grid"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="login-modal" class="login-modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <div class="login-panel glass-card">
+        <div class="login-brand"><span class="brand-mark">A</span><div><h2 id="login-title">登录</h2></div></div>
+        <div class="login-steps" aria-label="登录进度"><span id="login-step-account" class="active"><b>1</b>账号验证</span><i></i><span id="login-step-2fa"><b>2</b>双重认证</span></div>
+
+        <form id="login-form" class="login-form">
+          <label for="login-username">Apple ID</label>
+          <input id="login-username" name="username" type="email" autocomplete="username" placeholder="name@example.com" required maxlength="320">
+          <label for="login-password">密码</label>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Apple ID 密码" required maxlength="1024">
+          <button class="primary-button" type="submit"><span>开始登录</span><b>→</b></button>
+        </form>
+
+        <form id="login-2fa-form" class="login-form" hidden>
+          <p class="login-intro">Apple 已要求双重认证。Wrapper 只能提交最终的六位验证码。</p>
+          <p class="twofa-method-help">请检查受信任设备上的 Apple 登录通知或绑定手机号收到的短信，然后在下方输入最终的六位验证码。</p>
+          <label for="login-2fa-code">六位验证码</label>
+          <input id="login-2fa-code" name="code" class="login-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" placeholder="000000" required>
+          <button class="primary-button" type="submit"><span>验证并继续</span><b>→</b></button>
+        </form>
+
+        <div class="login-feedback" aria-live="polite"><span id="login-spinner" class="login-spinner"></span><p id="login-message">正在连接 Wrapper…</p></div>
+        <ol id="login-events" class="login-events"></ol>
+      </div>
+    </div>
+  </body>
+</html>

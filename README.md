@@ -1,195 +1,263 @@
-# Apple Music ALAC / Dolby Atmos Downloader
+# Apple Music Downloader
 
-[English](./README.md) | [简体中文](./README-CN.md) | [🌐 Cloud Server / Proxy Setup](./PROXY-SETUP.md)
+[简体中文](README-CN.md) · English
 
-> **Original script by Sorrow.** Modified with fixes and improvements.
+A local-first Apple Music download manager built with Go, an embedded web UI,
+SQLite queue persistence, and multi-architecture Docker images for
+`linux/amd64` and `linux/arm64`.
 
----
+> [!IMPORTANT]
+> This project is intended for personal research, interoperability, and lawful
+> backups of media you are authorized to access. You need a valid Apple Music
+> subscription. Follow local law and Apple's terms of service. This project is
+> not affiliated with or endorsed by Apple Inc.
 
-## ⚠️ Prerequisites
+## What this fork adds
 
-**Must be installed first:**
+- A responsive local web interface inspired by
+  [wenfeng110402/AppleMusic-Downloader](https://github.com/wenfeng110402/AppleMusic-Downloader).
+- A native Go HTTP API: jobs call the existing downloader functions directly;
+  the backend does not spawn the CLI as a subprocess.
+- A serial task queue backed by SQLite for pending jobs.
+- Browser-based file delivery, so the container needs no host-directory mount.
+- Wrapper login, Apple two-factor-code submission, status reporting, and logout
+  from the web UI. Credentials and verification codes are never persisted by
+  this application.
+- ALAC, Dolby Atmos, and AAC downloads, plus optional FLAC, MP3, Opus, or WAV
+  conversion through FFmpeg.
+- Ubuntu 24.04 images for AMD64 and ARM64 containing the matching Wrapper build,
+  a target-native GPAC build, FFmpeg, subtitle support, OpenJPEG, and related
+  media libraries.
 
-- **[MP4Box](https://gpac.io/downloads/gpac-nightly-builds/)** - Ensure it's correctly added to your environment variables
-- **[wrapper](https://github.com/WorldObservationLog/wrapper)** - Decryption program must be running before use
+The original CLI remains available. The Docker image starts web mode by default.
 
-**Optional (for MV download):**
+## Design
 
-- **[mp4decrypt](https://www.bento4.com/downloads/)**
-
----
-
-## ✨ Features
-
-1. **Inline Covers & LRC Lyrics** - Requires `media-user-token` (see instructions below)
-2. **Word-by-word & Out-of-sync Lyrics** support
-3. **Artist Album Download** - Automatically download all albums from an artist
-   ```bash
-   go run main.go https://music.apple.com/us/artist/taylor-swift/159260351 --all-album
-   ```
-4. **Stream Decryption** - Uses Sendy McSenderson's code for download-and-decrypt streaming, solving memory issues with large files
-5. **MV Download** - Requires mp4decrypt installation
-6. **Interactive Search** - Arrow-key navigation for search results
-   ```bash
-   go run main.go --search [song/album/artist] "search_term"
-   ```
-
----
-
-## 🎵 Supported Audio Formats
-
-| Format | Description | Requires Subscription |
-|--------|-------------|----------------------|
-| `alac` | audio-alac-stereo | ✅ |
-| `ec3` | audio-atmos / audio-ec3 | ✅ |
-| `aac` | audio-stereo | ✅ |
-| `aac-lc` | audio-stereo | ✅ |
-| `aac-binaural` | audio-stereo-binaural | ✅ |
-| `aac-downmix` | audio-stereo-downmix | ✅ |
-| `MV` | Music Video | ✅ |
-
-> **Note:** For `aac-lc`, `MV`, and `lyrics`, you must provide a valid `media-user-token` from an active subscription.
-
----
-
-## 🚀 Usage
-
-### Running with Docker
-
-1. Ensure the [wrapper](https://github.com/WorldObservationLog/wrapper) decryption program is running
-
-2. Start the downloader:
-
-```bash
-# Show help
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --help
-
-# Download albums
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader https://music.apple.com/ru/album/children-of-forever/1443732441
-
-# Download single song
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --song https://music.apple.com/ru/album/bass-folk-song/1443732441?i=1443732453
-
-# Interactive selection
-docker run -it --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --select https://music.apple.com/ru/album/children-of-forever/1443732441
-
-# Download playlists
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b
-
-# Dolby Atmos
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-
-# AAC format
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-
-# Debug/View quality
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --debug https://music.apple.com/ru/album/miles-smiles/209407331
+```text
+Local browser
+  ├─ embedded HTML/CSS/JS
+  ├─ login and final 2FA-code input
+  └─ browser Downloads or a user-selected directory
+          ↕ HTTP on host loopback only
+Go web/API service
+  ├─ Wrapper lifecycle and status manager
+  ├─ SQLite pending-job queue (serial execution)
+  ├─ existing native Go downloader functions
+  └─ temporary completed-file staging
+          ├─ Wrapper: Apple Music authentication/decryption service
+          ├─ GPAC/MP4Box: media processing and packaging
+          └─ FFmpeg: decoding, transcoding, subtitles, and codecs
 ```
 
-**Custom Configuration:**
+The downloader uses package-level state inherited from the upstream CLI, so web
+jobs are deliberately serialized. A job is removed from SQLite when execution
+starts. Running progress and completed/failed history live in memory; SQLite is
+not used as a progress cache.
 
-Mount your own `config.yaml`:
+Completed files stay in a temporary container directory only until the browser
+has received them. The API exposes opaque file IDs rather than container paths.
 
-```bash
-docker run --network host -v ./downloads:/downloads -v ./config.yaml:/app/config.yaml ghcr.io/zhaarey/apple-music-downloader [args]
+## Requirements
+
+- Docker Desktop, or Docker Engine with Buildx
+- A valid Apple Music subscription
+- A modern browser; Chrome/Edge is recommended for saving to a custom directory
+- Privileged-container support for the upstream Wrapper Android runtime
+
+The web port is published only to `127.0.0.1`. Do not expose it publicly: the
+application is designed for a trusted local browser or desktop WebView, not as a
+multi-user internet service.
+
+## Install and run
+
+### Docker Desktop / Docker CLI (recommended)
+
+No Compose file and no host-directory mount are required:
+
+```sh
+docker pull ghcr.io/ting-hiuyu/apple-music-downloader:latest
+
+docker run -d \
+  --name apple-music-downloader \
+  --restart unless-stopped \
+  --privileged \
+  -p 127.0.0.1:8080:8080 \
+  ghcr.io/ting-hiuyu/apple-music-downloader:latest
 ```
 
-> **Note:** Ensure `config.yaml` exists in your current directory before running. If it doesn't exist, Docker will create an empty directory instead of a file, causing the container to fail.
+Open <http://localhost:8080>.
 
----
+On Docker Desktop, run the same command in a terminal while Docker Desktop is
+running. `--privileged` is required because Wrapper starts an Android-like
+runtime and performs mounts. Without it, errors such as
+`mount /dev/urandom failed: Operation not permitted` are expected.
 
-### Running Locally (Go)
+The log reports `0.0.0.0:8080` because that is the address inside the container.
+The `-p 127.0.0.1:8080:8080` mapping still restricts host access to loopback.
 
-1. Ensure the [wrapper](https://github.com/WorldObservationLog/wrapper) decryption program is running
+Useful commands:
 
-2. **Download albums:**
-   ```bash
-   go run main.go https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511
-   ```
-
-3. **Download single song:**
-   ```bash
-   go run main.go --song https://music.apple.com/us/album/never-gonna-give-you-up-2022-remaster/1624945511?i=1624945512
-   # or
-   go run main.go https://music.apple.com/us/song/you-move-me-2022-remaster/1624945520
-   ```
-
-4. **Interactive selection:**
-   ```bash
-   go run main.go --select https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511
-   ```
-   Enter track numbers separated by spaces.
-
-5. **Download playlists:**
-   ```bash
-   go run main.go https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b
-   # or
-   go run main.go https://music.apple.com/us/playlist/hi-res-lossless-24-bit-192khz/pl.u-MDAWvpjt38370N
-   ```
-
-6. **Dolby Atmos:**
-   ```bash
-   go run main.go --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-   ```
-
-7. **AAC format:**
-   ```bash
-   go run main.go --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-   ```
-
-8. **View quality info:**
-   ```bash
-   go run main.go --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-   ```
-
-📖 [Chinese Tutorial (Method 3)](https://telegra.ph/Apple-Music-Alac%E9%AB%98%E8%A7%A3%E6%9E%90%E5%BA%A6%E6%97%A0%E6%8D%9F%E9%9F%B3%E4%B9%90%E4%B8%8B%E8%BD%BD%E6%95%99%E7%A8%8B-04-02-2)
-
----
-
-## 📝 Getting media-user-token (For Lyrics)
-
-1. Open [Apple Music](https://music.apple.com) and log in
-2. Open Developer Tools (F12)
-3. Navigate to `Application → Storage → Cookies → https://music.apple.com`
-4. Find the cookie named `media-user-token` and copy its value
-5. Paste the value into `config.yaml` under the `media-user-token` setting
-6. Save the file and start the script
-
----
-
-## 🌐 Getting Translation & Pronunciation Lyrics (Beta)
-
-> **Note:** These features are currently in beta.
-
-1. Open [Apple Music Beta](https://beta.music.apple.com) and log in
-2. Open Developer Tools (F12) and switch to the **Network** tab
-3. Search for a song that supports translation/pronunciation lyrics (K-Pop songs recommended)
-4. Press **Ctrl+R** to refresh and let DevTools capture network traffic
-5. Play the song and click the lyrics button - look for a request named `syllable-lyrics`
-6. Stop recording (click the red circle button), then select the **Fetch/XHR** tab
-7. Click on the `syllable-lyrics` request to view details
-8. Find the URL containing: `.../syllable-lyrics?l=<language_code>&extend=ttmlLocalizations`
-9. Copy the language value and paste it into `config.yaml`
-10. **Optional:** To disable pronunciation, remove the corresponding value in config.yaml: `...%5D=<remove_this_value>&extend...`
-11. Save and run the script as usual
-
----
-
-## 🖥️ Running on a Cloud Server (DigitalOcean / VPS)?
-
-If you're getting `503 Service Unavailable`  on your server, Apple Music's API likely blocks your server's IP.
-
-➡️ **See the full fix guide: [PROXY-SETUP.md](./PROXY-SETUP.md)**
-
-Quick summary — add this to `config.yaml` after setting up [Cloudflare WARP](./PROXY-SETUP.md#2-option-a--cloudflare-warp-recommended) or an [SSH tunnel](./PROXY-SETUP.md#3-option-b--ssh-reverse-tunnel-zero-cost-no-install):
-```yaml
-proxy: "socks5://127.0.0.1:1080"
+```sh
+docker logs -f apple-music-downloader
+docker restart apple-music-downloader
+docker stop apple-music-downloader
+docker rm apple-music-downloader
 ```
 
----
+Removing/recreating the container also removes its pending SQLite queue and
+Wrapper session because this deployment intentionally defines no volume.
 
-## 👏 Special Thanks
+### Docker Compose
 
-- **chocomint** - Created `agent-arm64.js`
+Build the current checkout and start it:
 
----
+```sh
+docker compose up -d --build
+```
+
+Change the host port if needed:
+
+```sh
+AMDL_PORT=8088 docker compose up -d --build
+```
+
+The supplied Compose file also binds only to `127.0.0.1`, enables privileged
+mode, and mounts no host paths or Docker Secrets.
+
+### Build images locally
+
+Build and load both target architectures with Buildx:
+
+```sh
+chmod +x scripts/build-images.sh
+./scripts/build-images.sh
+```
+
+This creates `apple-music-downloader:amd64` and
+`apple-music-downloader:arm64`. Cross-architecture GPAC compilation uses QEMU
+and can take considerably longer than a native build.
+
+To publish a multi-platform manifest:
+
+```sh
+IMAGE=ghcr.io/owner/apple-music-downloader PUSH=1 ./scripts/build-images.sh
+```
+
+Pushes to `main` also trigger the included GitHub Actions workflow, publishing
+`linux/amd64` and `linux/arm64` images to GHCR with `latest` and commit-SHA tags.
+
+### Run from Go source
+
+The web assets in `frontend/dist` are embedded into the Go binary:
+
+```sh
+cp config.yaml.example config.yaml
+go run . --web --listen 127.0.0.1:8080
+```
+
+This starts the UI/API, but successful decryption still requires a reachable
+Wrapper instance and the media tools configured for the local platform. Docker
+is the supported all-in-one installation.
+
+## First-use workflow
+
+1. Open the local page. If Wrapper has no usable session, the login dialog opens
+   automatically.
+2. Enter the Apple Music account credentials. They are sent to the local Go
+   service only to start Wrapper's login flow.
+3. If Apple requests two-factor authentication, check the trusted-device prompt
+   or the SMS sent to the trusted phone number, then enter the final six-digit
+   code in the same dialog.
+4. Add an Apple Music URL, choose ALAC/Atmos/AAC and an optional conversion
+   format, then submit the job.
+5. Choose **Downloads** to let the browser handle the file, or **Other location**
+   to select a directory in a compatible browser.
+
+Wrapper accepts the final verification code but does not provide an API for this
+project to select Apple's delivery method, trusted device, or phone number.
+
+For an album, the browser may ask for permission to download multiple files.
+Allow it if you selected browser Downloads.
+
+## Data and credential handling
+
+- Account credentials are not written to SQLite, config files, browser storage,
+  or application logs.
+- Wrapper's upstream login interface accepts credentials through command-line
+  arguments. They may therefore be briefly visible to processes with sufficient
+  access inside the privileged container while initial login is running. After
+  authentication, the backend restarts Wrapper without those arguments.
+- The six-digit verification code is written with mode `0600` only to Wrapper's
+  expected runtime path and is not stored in SQLite.
+- SQLite stores pending queue entries only; it does not cache progress.
+- The default Docker deployment has no volumes. Session, queue, and staged files
+  are part of the container's ephemeral writable layer.
+- Browser Downloads use the browser's configured directory. With **Other
+  location**, the browser grants the page a directory handle and writes each
+  streamed file there.
+
+## Build configuration
+
+| Setting | Purpose | Default |
+| --- | --- | --- |
+| `GPAC_REF` | GPAC stable Git tag compiled for each target | `v26.07.0` |
+| `WRAPPER_ARM64_URL` | ARM64 Wrapper release ZIP | `Wrapper.arm64.latest` |
+| `WRAPPER_AMD64_URL` | AMD64 Wrapper release ZIP | `Wrapper.x86_64.latest` |
+| `WRAPPER_SHA256` | Optional release checksum validation | empty |
+| `AMDL_PORT` | Compose host port | `8080` |
+| `WRAPPER_DISABLED=1` | Disable Wrapper for UI/API development | `0` |
+
+Wrapper's `latest` release tags are mutable. For controlled builds, mirror a
+known ZIP or pass its SHA-256 through `WRAPPER_SHA256`.
+
+More image details are in [DOCKER-BUILD.md](DOCKER-BUILD.md).
+
+## Troubleshooting
+
+### No verification code arrives
+
+Wait until the UI explicitly changes to the six-digit-code step. Delivery is
+controlled by Apple: check trusted devices and the trusted phone number. Wrapper
+cannot request a particular destination on behalf of the UI.
+
+### Wrapper login or decryption fails with a mount/permission error
+
+Confirm the existing container was created with `--privileged`. Adding the flag
+to a new command does not change an already-created container; remove and create
+that container again.
+
+### The UI is not reachable
+
+```sh
+docker ps --filter name=apple-music-downloader
+docker logs --tail 200 apple-music-downloader
+curl http://127.0.0.1:8080/api/health
+```
+
+### Files do not appear in the expected directory
+
+With **Downloads**, the browser owns the destination and may rename files or ask
+for multiple-download permission. Use **Other location** in Chrome/Edge when you
+need to select and display an explicit directory.
+
+## Credits and thanks
+
+This repository is a fork and extension of
+[zhaarey/apple-music-downloader](https://github.com/zhaarey/apple-music-downloader).
+Many thanks to its author and contributors for the Apple Music metadata,
+download, decryption, and tagging foundation.
+
+The container and web experience also rely on or draw inspiration from:
+
+- [WorldObservationLog/wrapper](https://github.com/WorldObservationLog/wrapper)
+  for the runtime and architecture-specific releases.
+- [GPAC](https://github.com/gpac/gpac) for MP4Box and media processing.
+- [FFmpeg](https://github.com/FFmpeg/FFmpeg) for decoding and transcoding.
+- [wenfeng110402/AppleMusic-Downloader](https://github.com/wenfeng110402/AppleMusic-Downloader)
+  for web-interface design inspiration.
+- [chocomint](https://github.com/chocomint) for the ARM64 agent work credited by
+  the upstream project, plus the upstream contributors credited for streaming
+  decryption and related research.
+
+Dependencies retain their own licenses and copyrights. See `go.mod`, the
+container build files, and the linked upstream repositories for details.

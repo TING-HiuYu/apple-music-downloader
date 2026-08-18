@@ -1,0 +1,16 @@
+services:
+  applemusic-downloader:
+    build:
+      context: .
+      args:
+        GPAC_REF: ${GPAC_REF:-v26.07.0}
+    image: ${AMDL_IMAGE:-apple-music-downloader:local}
+    ports:
+      - "127.0.0.1:${AMDL_PORT:-8080}:8080"
+    # The upstream Wrapper Android runtime requires a privileged container.
+    # ARM64 media-context restarts are recovered by the backend and are not a
+    # substitute for this deployment requirement.
+    privileged: true
+    environment:
+      WRAPPER_DISABLED: ${WRAPPER_DISABLED:-0}
+    restart: unless-stopped

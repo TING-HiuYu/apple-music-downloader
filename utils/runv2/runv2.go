@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"main/utils/structs"
@@ -20,7 +21,9 @@ import (
 	"github.com/itouakirai/mp4ff/mp4"
 	"github.com/schollz/progressbar/v3"
 )
+
 const prefetchKey = "skd://itunes.apple.com/P000000000/s1/e1"
+
 var ErrTimeout = errors.New("response timed out")
 
 type TimedResponseBody struct {
@@ -28,6 +31,36 @@ type TimedResponseBody struct {
 	timer     *time.Timer
 	threshold int
 	body      io.Reader
+}
+
+type callbackWriter struct {
+	total   int64
+	written int64
+	last    int
+	stage   string
+	report  func(string, int)
+}
+
+func (w *callbackWriter) Write(p []byte) (int, error) {
+	w.written += int64(len(p))
+	percent := 0
+	if w.total > 0 {
+		percent = int(w.written * 100 / w.total)
+		if percent > 100 {
+			percent = 100
+		}
+	}
+	if percent != w.last {
+		w.last = percent
+		w.report(w.stage, percent)
+	}
+	return len(p), nil
+}
+
+func emitProgress(report func(string, int), stage string, percent int) {
+	if report != nil {
+		report(stage, percent)
+	}
 }
 
 func (b *TimedResponseBody) Read(p []byte) (int, error) {
@@ -42,8 +75,8 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-
-func Run(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet) error {
+func Run(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet, progress func(string, int)) error {
+	emitProgress(progress, "download", 0)
 	var err error
 	var optstimeout uint
 	optstimeout = 0
@@ -95,6 +128,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	req.Header = header
 
 	var body io.Reader
+	var bufferedMedia []byte
 	client := &http.Client{Timeout: timeout}
 	if optstimeout > 0 {
 		// create the timer before calling Do so that the timeout covers TCP handshake,
@@ -117,7 +151,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 			return err
 		}
 		defer do.Body.Close()
-		if do.ContentLength < int64(Config.MaxMemoryLimit * 1024 * 1024) {
+		if do.ContentLength < int64(Config.MaxMemoryLimit*1024*1024) {
 			var buffer bytes.Buffer
 			bar := progressbar.NewOptions64(
 				do.ContentLength,
@@ -137,27 +171,41 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 					BarEnd:        "",
 				}),
 			)
-			io.Copy(io.MultiWriter(&buffer, bar), do.Body)
-			body = &buffer
+			tracker := &callbackWriter{total: do.ContentLength, stage: "download", report: progress}
+			if _, err := io.Copy(io.MultiWriter(&buffer, bar, tracker), do.Body); err != nil {
+				return err
+			}
+			emitProgress(progress, "download", 100)
+			bufferedMedia = buffer.Bytes()
+			body = bytes.NewReader(bufferedMedia)
 			fmt.Print("Downloaded\n")
 		} else {
 			body = do.Body
+			emitProgress(progress, "download", 100)
 		}
 	}
 
 	var totalLen int64
 	totalLen = do.ContentLength
-	// connect to decryptor
-	//addr := fmt.Sprintf("127.0.0.1:10020")
-	addr := Config.DecryptM3u8Port
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		return err
+	err = decryptWithWrapper(body, outfile, adamId, segments, totalLen, Config, progress)
+	for retry := 1; retry <= 2 && err != nil && bufferedMedia != nil && isRetryableDecryptError(err); retry++ {
+		// The current ARM64 Wrapper release can terminate its Android child while
+		// establishing the first FairPlay context after login. The web process
+		// restarts Wrapper automatically, so retain the encrypted response in
+		// memory and retry only decryption after the socket is available. Two
+		// retries cover an externally interrupted process followed by Wrapper's
+		// one-time context initialization exit without masking content errors.
+		fmt.Printf("Decryptor connection was interrupted; waiting for Wrapper (retry %d/2): %v\n", retry, err)
+		if waitErr := waitForDecryptor(Config.DecryptM3u8Port, 12*time.Second); waitErr != nil {
+			break
+		}
+		if refreshErr := refreshDevicePlaylist(Config.GetM3u8Port, adamId); refreshErr != nil {
+			err = fmt.Errorf("restore Wrapper playback context: %w", refreshErr)
+			continue
+		}
+		emitProgress(progress, "decrypt", 0)
+		err = decryptWithWrapper(bytes.NewReader(bufferedMedia), outfile, adamId, segments, totalLen, Config, progress)
 	}
-	//fmt.Print("Decrypting...\n")
-	defer Close(conn)
-
-	err = downloadAndDecryptFile(conn, body, outfile, adamId, segments, totalLen, Config)
 	if err != nil {
 		return err
 	}
@@ -165,8 +213,127 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	return nil
 }
 
+func decryptWithWrapper(body io.Reader, outfile string, adamId string, segments []*m3u8.MediaSegment,
+	totalLen int64, Config structs.ConfigSet, progress func(string, int)) error {
+	if err := warmDecryptor(Config.DecryptM3u8Port, adamId, segments); err != nil {
+		return fmt.Errorf("prepare Wrapper key context: %w", err)
+	}
+	conn, err := net.DialTimeout("tcp", Config.DecryptM3u8Port, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	defer Close(conn)
+	return downloadAndDecryptFile(conn, body, outfile, adamId, segments, totalLen, Config, progress)
+}
+
+func warmDecryptor(address string, adamId string, segments []*m3u8.MediaSegment) error {
+	seen := make(map[string]struct{})
+	for _, segment := range segments {
+		if segment == nil || segment.Key == nil || segment.Key.URI == "" {
+			continue
+		}
+		keyAdamID := adamId
+		if segment.Key.URI == prefetchKey {
+			keyAdamID = "0"
+		}
+		identity := keyAdamID + "\x00" + segment.Key.URI
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		if err := warmDecryptorKey(address, keyAdamID, segment.Key.URI); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func warmDecryptorKey(address string, adamId string, keyURI string) error {
+	connection, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	defer Close(connection)
+	rw := bufio.NewReadWriter(bufio.NewReader(connection), bufio.NewWriter(connection))
+	if err := SendString(rw, adamId); err != nil {
+		return err
+	}
+	if err := SendString(rw, keyURI); err != nil {
+		return err
+	}
+	probe := make([]byte, 16)
+	if err := binary.Write(rw, binary.LittleEndian, uint32(len(probe))); err != nil {
+		return err
+	}
+	if _, err := rw.Write(probe); err != nil {
+		return err
+	}
+	if err := rw.Flush(); err != nil {
+		return err
+	}
+	_, err = io.ReadFull(rw, probe)
+	return err
+}
+
+func refreshDevicePlaylist(address string, adamId string) error {
+	if len(adamId) == 0 || len(adamId) > 255 {
+		return errors.New("invalid adam ID for Wrapper m3u8 request")
+	}
+	connection, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	if _, err := connection.Write(append([]byte{byte(len(adamId))}, []byte(adamId)...)); err != nil {
+		return err
+	}
+	response, err := bufio.NewReader(connection).ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(strings.TrimSpace(response), ".m3u8") {
+		return errors.New("Wrapper returned an empty device playlist")
+	}
+	return nil
+}
+
+func isRetryableDecryptError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection reset", "connection refused", "broken pipe", "unexpected eof", "use of closed network connection",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return errors.Is(err, io.EOF)
+}
+
+func waitForDecryptor(address string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	// Give the wrapper manager time to observe the old child exit before a
+	// readiness probe can accidentally connect to its still-closing socket.
+	time.Sleep(time.Second)
+	for time.Now().Before(deadline) {
+		connection, err := net.DialTimeout("tcp", address, 250*time.Millisecond)
+		if err == nil {
+			_ = connection.Close()
+			// Let the manager promote the same process to authenticated before the
+			// caller restores its device playback context over the m3u8 socket.
+			time.Sleep(500 * time.Millisecond)
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("Wrapper did not restore %s within %s", address, timeout)
+}
+
 func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
-	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config structs.ConfigSet) error {
+	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config structs.ConfigSet, progress func(string, int)) error {
+	emitProgress(progress, "decrypt", 0)
 	var buffer bytes.Buffer
 	var outBuf *bufio.Writer
 	MaxMemorySize := int64(Config.MaxMemoryLimit * 1024 * 1024)
@@ -223,6 +390,9 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		}),
 	)
 	bar.Add64(int64(offset))
+	if totalLen > 0 {
+		emitProgress(progress, "decrypt", int(int64(offset)*100/totalLen))
+	}
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	for i := 0; ; i++ {
 		var frag *mp4.Fragment
@@ -267,6 +437,9 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 			return err
 		}
 		bar.Add64(int64(rawoffset))
+		if totalLen > 0 {
+			emitProgress(progress, "decrypt", int(int64(offset)*100/totalLen))
+		}
 	}
 	err = outBuf.Flush()
 	if err != nil {
@@ -285,6 +458,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 			return err
 		}
 	}
+	emitProgress(progress, "decrypt", 100)
 	return nil
 }
 
@@ -362,7 +536,7 @@ func parseMediaPlaylist(r io.ReadCloser) ([]*m3u8.MediaSegment, error) {
 	return mediaPlaylist.Segments, nil
 }
 
-//pasing
+// pasing
 func ReadInitSegment(r io.Reader) (*mp4.InitSegment, uint64, error) {
 	var offset uint64 = 0
 	init := mp4.NewMP4Init()
@@ -453,7 +627,8 @@ func TransformInit(init *mp4.InitSegment) (map[uint32]mp4.DecryptTrackInfo, erro
 	}
 	return tracks, nil
 }
-//remote
+
+// remote
 // Reset the loops on the script's end and close the connection
 func Close(conn io.WriteCloser) error {
 	defer conn.Close()
@@ -475,8 +650,6 @@ func SendString(conn io.Writer, uri string) error {
 	_, err = io.WriteString(conn, uri)
 	return err
 }
-
-
 
 func cbcsFullSubsampleDecrypt(data []byte, conn *bufio.ReadWriter) error {
 	// Drops 4 last bits -> multiple of 16

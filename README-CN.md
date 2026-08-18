@@ -1,195 +1,237 @@
-# Apple Music ALAC / 杜比全景声下载器
+# Apple Music Downloader
 
-[English](./README.md) | [简体中文](./README-CN.md) | [🌐 云服务器/代理配置](./PROXY-SETUP.md)
+简体中文 · [English](README.md)
 
-> **原脚本由 Sorrow 编写。** 本仓库已作修改，包含一些修复和改进。
+一个本地优先的 Apple Music 下载管理器：使用 Go 后端、内嵌 Web 前端、SQLite 队列，
+并提供 `linux/amd64` 与 `linux/arm64` 多架构 Docker 镜像。
 
----
+> [!IMPORTANT]
+> 本项目仅用于个人研究、互操作性分析，以及对你有权访问内容的合法备份。使用时需要
+> 有效的 Apple Music 订阅，并应遵守所在地法律及 Apple 服务条款。本项目与 Apple Inc.
+> 无隶属、合作或背书关系。
 
-## ⚠️ 前置要求
+## 本分支增加了什么
 
-**必须首先安装：**
+- 参考 [wenfeng110402/AppleMusic-Downloader](https://github.com/wenfeng110402/AppleMusic-Downloader)
+  设计的本地 Web 界面。
+- 原生 Go HTTP API：任务直接调用已有的 Go 下载函数，不把 CLI 当作子进程运行。
+- 使用 SQLite 保存待执行任务，当前按顺序一次执行一个任务。
+- 下载结果通过浏览器传给用户，因此容器不需要挂载宿主机下载目录。
+- 在前端完成 Wrapper 登录、Apple 双重验证最终六位码输入、状态反馈和登出；本应用
+  不持久化账号密码或验证码。
+- 支持 ALAC、Dolby Atmos、AAC，以及使用 FFmpeg 转换为 FLAC、MP3、Opus、WAV。
+- Ubuntu 24.04 的 AMD64/ARM64 镜像，分别内置对应架构的 Wrapper、原生编译的
+  GPAC、FFmpeg、字幕支持、OpenJPEG 和相关媒体库。
 
-- **[MP4Box](https://gpac.io/downloads/gpac-nightly-builds/)** - 确保已正确添加到环境变量
-- **[wrapper](https://github.com/WorldObservationLog/wrapper)** - 解密程序必须在使用前运行
+原有命令行模式仍然保留；Docker 镜像默认启动 Web 模式。
 
-**可选（用于 MV 下载）：**
+## 项目设计
 
-- **[mp4decrypt](https://www.bento4.com/downloads/)**
-
----
-
-## ✨ 功能特性
-
-1. **内嵌封面和 LRC 歌词** - 需要 `media-user-token`（见下方说明）
-2. **逐词与未同步歌词** 支持
-3. **歌手专辑下载** - 自动下载歌手的所有专辑
-   ```bash
-   go run main.go https://music.apple.com/us/artist/taylor-swift/159260351 --all-album
-   ```
-4. **流式解密** - 使用 Sendy McSenderson 的代码实现边下载边解密，解决大文件解密时内存不足问题
-5. **MV 下载** - 需要安装 mp4decrypt
-6. **交互式搜索** - 支持方向键导航搜索结果
-   ```bash
-   go run main.go --search [song/album/artist] "search_term"
-   ```
-
----
-
-## 🎵 支持的音频格式
-
-| 格式 | 描述 | 需要订阅 |
-|--------|-------------|----------------------|
-| `alac` | audio-alac-stereo | ✅ |
-| `ec3` | audio-atmos / audio-ec3 | ✅ |
-| `aac` | audio-stereo | ✅ |
-| `aac-lc` | audio-stereo | ✅ |
-| `aac-binaural` | audio-stereo-binaural | ✅ |
-| `aac-downmix` | audio-stereo-downmix | ✅ |
-| `MV` | 音乐视频 | ✅ |
-
-> **注意：** 对于 `aac-lc`、`MV` 和 `歌词`，必须提供有效订阅的 `media-user-token`。
-
----
-
-## 🚀 使用方法
-
-### 使用 Docker 运行
-
-1. 确保 [wrapper](https://github.com/WorldObservationLog/wrapper) 解密程序正在运行
-
-2. 启动下载器：
-
-```bash
-# 显示帮助
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --help
-
-# 下载专辑
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader https://music.apple.com/ru/album/children-of-forever/1443732441
-
-# 下载单曲
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --song https://music.apple.com/ru/album/bass-folk-song/1443732441?i=1443732453
-
-# 交互式选择
-docker run -it --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --select https://music.apple.com/ru/album/children-of-forever/1443732441
-
-# 下载播放列表
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b
-
-# 杜比全景声
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-
-# AAC 格式
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-
-# 调试/查看音质
-docker run --network host -v ./downloads:/downloads ghcr.io/zhaarey/apple-music-downloader --debug https://music.apple.com/ru/album/miles-smiles/209407331
+```text
+本地浏览器
+  ├─ 内嵌的 HTML/CSS/JavaScript
+  ├─ 登录与最终六位验证码输入
+  └─ 浏览器“下载目录”或用户选择的“其他位置”
+          ↕ 仅通过宿主机回环地址访问
+Go Web/API 服务
+  ├─ Wrapper 生命周期与状态管理
+  ├─ SQLite 待执行队列（串行执行）
+  ├─ 项目已有的 Go 下载函数
+  └─ 已完成文件的临时中转区
+          ├─ Wrapper：Apple Music 登录与解密服务
+          ├─ GPAC/MP4Box：媒体处理和封装
+          └─ FFmpeg：解码、转码、字幕和编解码器
 ```
 
-**自定义配置：**
+上游 CLI 的下载逻辑包含包级共享状态，因此 Web 任务有意采用串行执行。任务开始执行
+时就会从 SQLite 中删除；执行进度、成功记录和失败记录只保存在内存中，SQLite 不用于
+缓存进度。
 
-挂载自己的 `config.yaml`：
+完成的文件只在容器临时目录中保留到浏览器接收为止。API 使用不透明文件 ID，不会把
+容器内路径暴露给前端。
 
-```bash
-docker run --network host -v ./downloads:/downloads -v ./config.yaml:/app/config.yaml ghcr.io/zhaarey/apple-music-downloader [参数]
+## 使用要求
+
+- Docker Desktop，或支持 Buildx 的 Docker Engine
+- 有效的 Apple Music 订阅
+- 现代浏览器；需要选择自定义目录时推荐 Chrome/Edge
+- 能够为上游 Wrapper Android 运行时启用特权容器
+
+Web 端口只发布到 `127.0.0.1`。请勿把它部署到公网：它的设计目标是可信的本地浏览器
+或桌面 WebView，而不是多用户互联网服务。
+
+## 安装与部署
+
+### Docker Desktop / Docker 命令行（推荐）
+
+不需要 Compose，也不需要挂载任何宿主机目录：
+
+```sh
+docker pull ghcr.io/ting-hiuyu/apple-music-downloader:latest
+
+docker run -d \
+  --name apple-music-downloader \
+  --restart unless-stopped \
+  --privileged \
+  -p 127.0.0.1:8080:8080 \
+  ghcr.io/ting-hiuyu/apple-music-downloader:latest
 ```
 
-> **注意：** 运行前请确保当前目录下存在 `config.yaml` 文件。如果不存在，Docker 会创建一个空目录而非文件，导致容器启动失败。
+打开 <http://localhost:8080>。
 
----
+使用 Docker Desktop 时，只要 Docker Desktop 正在运行，就可以在终端执行同一条命令。
+`--privileged` 是必需的，因为 Wrapper 会启动类似 Android 的运行时并执行挂载；缺少
+该参数时通常会看到 `mount /dev/urandom failed: Operation not permitted`。
 
-### 本地运行 (Go)
+日志显示 `0.0.0.0:8080` 指的是容器内部监听地址；宿主机上的
+`-p 127.0.0.1:8080:8080` 仍然保证只有本机回环接口可以访问。
 
-1. 确保 [wrapper](https://github.com/WorldObservationLog/wrapper) 解密程序正在运行
+常用命令：
 
-2. **下载专辑：**
-   ```bash
-   go run main.go https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511
-   ```
-
-3. **下载单曲：**
-   ```bash
-   go run main.go --song https://music.apple.com/us/album/never-gonna-give-you-up-2022-remaster/1624945511?i=1624945512
-   # 或
-   go run main.go https://music.apple.com/us/song/you-move-me-2022-remaster/1624945520
-   ```
-
-4. **交互式选择：**
-   ```bash
-   go run main.go --select https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511
-   ```
-   输入以空格分隔的曲目编号。
-
-5. **下载播放列表：**
-   ```bash
-   go run main.go https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b
-   # 或
-   go run main.go https://music.apple.com/us/playlist/hi-res-lossless-24-bit-192khz/pl.u-MDAWvpjt38370N
-   ```
-
-6. **杜比全景声：**
-   ```bash
-   go run main.go --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-   ```
-
-7. **AAC 格式：**
-   ```bash
-   go run main.go --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-   ```
-
-8. **查看音质信息：**
-   ```bash
-   go run main.go --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538
-   ```
-
-📖 [中文教程 - 详见方法三](https://telegra.ph/Apple-Music-Alac%E9%AB%98%E8%A7%A3%E6%9E%90%E5%BA%A6%E6%97%A0%E6%8D%9F%E9%9F%B3%E4%B9%90%E4%B8%8B%E8%BD%BD%E6%95%99%E7%A8%8B-04-02-2)
-
----
-
-## 📝 获取 media-user-token（用于歌词）
-
-1. 打开 [Apple Music](https://music.apple.com) 并登录
-2. 打开开发者工具（F12）
-3. 导航到 `Application → Storage → Cookies → https://music.apple.com`
-4. 找到名为 `media-user-token` 的 Cookie 并复制其值
-5. 将该值粘贴到 `config.yaml` 中的 `media-user-token` 设置项
-6. 保存文件并启动脚本
-
----
-
-## 🌐 获取翻译和发音歌词（Beta）
-
-> **注意：** 此功能目前处于测试阶段。
-
-1. 打开 [Apple Music Beta](https://beta.music.apple.com) 并登录
-2. 打开开发者工具（F12），切换到 **Network** 标签页
-3. 搜索支持翻译/发音歌词的歌曲（推荐 K-Pop 歌曲）
-4. 按 **Ctrl+R** 刷新页面，让开发者工具捕获网络数据
-5. 播放歌曲并点击歌词按钮 - 查找名为 `syllable-lyrics` 的请求
-6. 停止录制（点击左上角红色圆圈按钮），然后选择 **Fetch/XHR** 标签
-7. 点击 `syllable-lyrics` 请求查看详情
-8. 找到包含以下格式的 URL：`.../syllable-lyrics?l=<language_code>&extend=ttmlLocalizations`
-9. 复制语言值并粘贴到 `config.yaml` 中
-10. **可选：** 如需禁用发音，在 config.yaml 中移除对应值：`...%5D=<remove_this_value>&extend...`
-11. 保存并照常运行脚本
-
----
-
-## 🖥️ 在云服务器上运行？（DigitalOcean / VPS）
-
-如果你在服务器上遇到 `503 Service Unavailable` 或 `failed to get lyrics`，说明 Apple Music API 封锁了你服务器的 IP。
-
-➡️ **完整解决方案：[PROXY-SETUP.md](./PROXY-SETUP.md)**
-
-快速配置——安装 [Cloudflare WARP](./PROXY-SETUP.md#2-方案-a--cloudflare-warp推荐) 或使用 [SSH 隆道](./PROXY-SETUP.md#3-方案-b--ssh-反向隊道零成本无需安装)，然后在 `config.yaml` 中添加：
-```yaml
-proxy: "socks5://127.0.0.1:1080"
+```sh
+docker logs -f apple-music-downloader
+docker restart apple-music-downloader
+docker stop apple-music-downloader
+docker rm apple-music-downloader
 ```
 
----
+由于默认部署有意不创建 volume，删除并重新创建容器时，待执行 SQLite 队列和 Wrapper
+会话也会一并删除。
 
-## 👏 特别感谢
+### Docker Compose
 
-- **chocomint** - 构建了 `agent-arm64.js`
+构建当前代码并启动：
 
----
+```sh
+docker compose up -d --build
+```
+
+修改宿主机端口：
+
+```sh
+AMDL_PORT=8088 docker compose up -d --build
+```
+
+项目提供的 Compose 文件同样只绑定 `127.0.0.1`、启用特权模式，而且不挂载宿主机
+目录、命名卷或 Docker Secrets。
+
+### 本地构建多架构镜像
+
+使用 Buildx 构建并加载两个架构：
+
+```sh
+chmod +x scripts/build-images.sh
+./scripts/build-images.sh
+```
+
+构建结果为 `apple-music-downloader:amd64` 和 `apple-music-downloader:arm64`。
+跨架构构建 GPAC 会使用 QEMU，因此可能比原生架构构建慢很多。
+
+发布多平台 manifest：
+
+```sh
+IMAGE=ghcr.io/owner/apple-music-downloader PUSH=1 ./scripts/build-images.sh
+```
+
+推送到 `main` 时，项目内置 GitHub Actions 也会自动构建并发布 `linux/amd64`、
+`linux/arm64` 镜像到 GHCR，同时生成 `latest` 和 commit SHA 标签。
+
+### 从 Go 源码运行
+
+`frontend/dist` 中的前端会被编译进 Go 二进制：
+
+```sh
+cp config.yaml.example config.yaml
+go run . --web --listen 127.0.0.1:8080
+```
+
+这会启动 Web UI/API，但实际解密仍需要可访问的 Wrapper 和本机媒体工具。Docker 是
+目前推荐的一体化安装方式。
+
+## 第一次使用
+
+1. 打开本地页面。如果 Wrapper 没有可用会话，登录弹窗会自动出现。
+2. 输入 Apple Music 账号凭据。它们只会发送到本地 Go 服务，用来启动 Wrapper 登录。
+3. 如果 Apple 要求双重验证，请检查受信任设备通知或绑定手机号收到的短信，然后在
+   同一弹窗中输入最终六位验证码。
+4. 添加 Apple Music 链接，选择 ALAC/Atmos/AAC 和可选的转换格式，再提交任务。
+5. 选择“下载目录”时由浏览器接管下载；选择“其他位置”时，可在兼容浏览器中指定目录。
+
+Wrapper 能接收最终验证码，但没有提供让本项目选择 Apple 验证码发送方式、受信任设备
+或手机号的接口。
+
+下载专辑时，如果使用浏览器“下载目录”，浏览器可能请求“允许下载多个文件”的权限，
+请按需允许。
+
+## 数据与账号凭据
+
+- 账号密码不会写入 SQLite、配置文件、浏览器存储或应用日志。
+- 上游 Wrapper 的登录接口通过命令行参数接收凭据。因此在首次登录期间，拥有容器内
+  足够权限的进程可能短暂看到这些参数。认证完成后，后端会停止该进程，并在不携带
+  登录参数的情况下重新启动 Wrapper。
+- 六位验证码只会以 `0600` 权限写入 Wrapper 要求的运行时文件，不会存入 SQLite。
+- SQLite 只保存待执行队列，不缓存进度。
+- 默认 Docker 部署没有 volume；会话、队列和中转文件都位于容器可写层。
+- “下载目录”由浏览器自己的下载设置决定；“其他位置”由浏览器授权页面获取目录句柄，
+  再把每个流式文件写入该目录。
+
+## 构建参数
+
+| 参数 | 用途 | 默认值 |
+| --- | --- | --- |
+| `GPAC_REF` | 为各目标架构编译的 GPAC stable Git 标签 | `v26.07.0` |
+| `WRAPPER_ARM64_URL` | ARM64 Wrapper ZIP | `Wrapper.arm64.latest` |
+| `WRAPPER_AMD64_URL` | AMD64 Wrapper ZIP | `Wrapper.x86_64.latest` |
+| `WRAPPER_SHA256` | 可选的 Wrapper 文件校验 | 空 |
+| `AMDL_PORT` | Compose 发布到宿主机的端口 | `8080` |
+| `WRAPPER_DISABLED=1` | 开发 UI/API 时禁用 Wrapper | `0` |
+
+Wrapper 的 `latest` release 标签会变化。需要可复现构建时，请镜像保存已知 ZIP，或通过
+`WRAPPER_SHA256` 提供当前文件的 SHA-256。
+
+更多镜像细节见 [DOCKER-BUILD.md](DOCKER-BUILD.md)。
+
+## 常见问题
+
+### 没有收到双重验证码
+
+先等前端明确进入六位验证码步骤。验证码由 Apple 发送，请检查受信任设备和绑定手机。
+Wrapper 无法代替前端指定发送到哪台设备或哪个手机号。
+
+### Wrapper 登录或解密出现挂载/权限错误
+
+确认当前容器在创建时就带有 `--privileged`。给一条新的启动命令加参数不会修改已经创建
+的容器，需要删除旧容器后重新创建。
+
+### 页面无法打开
+
+```sh
+docker ps --filter name=apple-music-downloader
+docker logs --tail 200 apple-music-downloader
+curl http://127.0.0.1:8080/api/health
+```
+
+### 文件没有出现在预期目录
+
+使用“下载目录”时，目标位置完全由浏览器管理，浏览器也可能重命名文件或请求多文件
+下载权限。需要选择并显示明确目录时，请在 Chrome/Edge 中使用“其他位置”。
+
+## 引用、致谢
+
+本仓库基于 [zhaarey/apple-music-downloader](https://github.com/zhaarey/apple-music-downloader)
+扩展而来。感谢原作者和所有贡献者完成 Apple Music 元数据、下载、解密、标签写入等
+核心工作。
+
+容器和 Web 版本还使用或参考了以下优秀项目：
+
+- [WorldObservationLog/wrapper](https://github.com/WorldObservationLog/wrapper)：Wrapper
+  运行时及各架构 release。
+- [GPAC](https://github.com/gpac/gpac)：MP4Box 和媒体处理能力。
+- [FFmpeg](https://github.com/FFmpeg/FFmpeg)：解码与转码能力。
+- [wenfeng110402/AppleMusic-Downloader](https://github.com/wenfeng110402/AppleMusic-Downloader)：
+  Web 界面设计参考。
+- [chocomint](https://github.com/chocomint)：上游项目注明的 ARM64 agent 工作；同时感谢
+  上游项目中参与流式解密和相关研究的贡献者。
+
+各依赖继续遵循其自身的许可证和版权声明，详情请查看 `go.mod`、容器构建文件及上述
+上游仓库。

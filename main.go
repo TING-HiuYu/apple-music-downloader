@@ -1030,9 +1030,10 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 			return
 		}
 		//边下载边解密
-		err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
+		err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config, reportNativeProgress)
 		if err != nil {
 			fmt.Println("Failed to run v2:", err)
+			recordNativeError(fmt.Errorf("音频解密失败: %w", err))
 			counter.Error++
 			return
 		}
@@ -1960,6 +1961,17 @@ func writeMP4Tags(track *task.Track, lrc string) error {
 	return nil
 }
 
+func resolveAuthorizationToken() (string, error) {
+	token, err := ampapi.GetToken()
+	if err == nil {
+		return token, nil
+	}
+	if Config.AuthorizationToken != "" && Config.AuthorizationToken != "your-authorization-token" {
+		return strings.Replace(Config.AuthorizationToken, "Bearer ", "", 1), nil
+	}
+	return "", err
+}
+
 func main() {
 	err := loadConfig()
 	if err != nil {
@@ -1970,17 +1982,12 @@ func main() {
 		fmt.Printf("proxy config error: %v\n", err)
 		return
 	}
-	token, err := ampapi.GetToken()
-	if err != nil {
-		if Config.AuthorizationToken != "" && Config.AuthorizationToken != "your-authorization-token" {
-			token = strings.Replace(Config.AuthorizationToken, "Bearer ", "", -1)
-		} else {
-			fmt.Println("Failed to get token.")
-			return
-		}
-	}
 	var search_type string
+	var webMode bool
+	var listenAddress string
 	pflag.StringVar(&search_type, "search", "", "Search for 'album', 'song', or 'artist'. Provide query after flags.")
+	pflag.BoolVar(&webMode, "web", false, "Start the web interface and API server")
+	pflag.StringVar(&listenAddress, "listen", "127.0.0.1:8080", "Web server listen address")
 	pflag.BoolVar(&dl_atmos, "atmos", false, "Enable atmos download mode")
 	pflag.BoolVar(&dl_aac, "aac", false, "Enable adm-aac download mode")
 	pflag.BoolVar(&dl_select, "select", false, "Enable selective download")
@@ -2008,6 +2015,20 @@ func main() {
 	Config.AacType = *aac_type
 	Config.MVAudioType = *mv_audio_type
 	Config.MVMax = *mv_max
+
+	if webMode {
+		Config.ExitOnError = true
+		if err := startWebServer(listenAddress); err != nil {
+			fmt.Printf("web server failed: %v\n", err)
+		}
+		return
+	}
+
+	token, err := resolveAuthorizationToken()
+	if err != nil {
+		fmt.Println("Failed to get token.")
+		return
+	}
 
 	args := pflag.Args()
 
