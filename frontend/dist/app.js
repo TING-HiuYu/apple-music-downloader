@@ -32,6 +32,34 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
+const embeddingSupport = {
+  none: { lyrics: true, cover: true },
+  flac: { lyrics: true, cover: true },
+  mp3: { lyrics: true, cover: true },
+  opus: { lyrics: true, cover: false },
+  wav: { lyrics: false, cover: false }
+};
+
+function syncEmbeddingFormats() {
+  const formatSelect = $("#convert-format");
+  const embedLyrics = $("#embed-lyrics").checked;
+  const embedCover = $("#embed-cover").checked;
+  let changed = false;
+
+  [...formatSelect.options].forEach((option) => {
+    const support = embeddingSupport[option.value] || { lyrics: true, cover: true };
+    option.disabled = (embedLyrics && !support.lyrics) || (embedCover && !support.cover);
+    if (option.disabled && option.selected) changed = true;
+  });
+
+  if (changed) {
+    formatSelect.value = "none";
+    const message = $("#form-message");
+    message.textContent = "当前内嵌选项不受所选格式支持，已切换为保持原格式。";
+    message.className = "form-message show";
+  }
+}
+
 function renderTasks() {
   $("#queue-count").textContent = state.tasks.filter((task) => ["queued", "running"].includes(task.status)).length;
   const container = $("#task-list");
@@ -336,6 +364,10 @@ $("#download-form").addEventListener("submit", async (event) => {
 $$('.quality input').forEach((input) => input.addEventListener("change", () => {
   $$(".quality").forEach((label) => label.classList.toggle("active", label.contains($('input[name="quality"]:checked'))));
 }));
+
+$("#embed-lyrics").addEventListener("change", syncEmbeddingFormats);
+$("#embed-cover").addEventListener("change", syncEmbeddingFormats);
+syncEmbeddingFormats();
 
 async function refreshWithAnimation(button, refresh) {
   button.disabled = true;

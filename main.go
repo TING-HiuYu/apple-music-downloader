@@ -691,18 +691,19 @@ func buildFFmpegArgs(ffmpegPath, inPath, outPath, targetFmt, extraArgs string) (
 	}
 	switch targetFmt {
 	case "flac":
-		// Map all streams and copy the embedded cover (attached_pic) so album
-		// art survives the ALAC(.m4a) -> FLAC transcode. Without -map 0 / -c:v copy
-		// ffmpeg only keeps the audio stream and the artwork is silently dropped.
-		args = append(args, "-map", "0", "-c:a", "flac", "-c:v", "copy", "-disposition:v", "attached_pic")
+		// FLAC stores cover art in a PICTURE metadata block. FFmpeg represents it
+		// as an attached video stream, so map the optional artwork explicitly.
+		args = append(args, "-map", "0:a:0", "-map", "0:v?", "-c:a", "flac", "-c:v", "copy", "-disposition:v", "attached_pic")
 	case "mp3":
-		// VBR quality 2 ~ high quality
-		args = append(args, "-c:a", "libmp3lame", "-qscale:a", "2")
+		// ID3v2 supports both an APIC cover and a USLT lyrics frame. Metadata is
+		// copied above; explicitly map the optional artwork into the ID3 tag.
+		args = append(args, "-map", "0:a:0", "-map", "0:v?", "-c:a", "libmp3lame", "-qscale:a", "2", "-c:v", "copy", "-id3v2_version", "3", "-disposition:v", "attached_pic", "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)")
 	case "opus":
-		// Medium/high quality
-		args = append(args, "-c:a", "libopus", "-b:a", "192k", "-vbr", "on")
+		// Ogg/Opus keeps lyrics as a Vorbis comment, but its muxer does not
+		// reliably support an attached picture stream.
+		args = append(args, "-map", "0:a:0", "-c:a", "libopus", "-b:a", "192k", "-vbr", "on")
 	case "wav":
-		args = append(args, "-c:a", "pcm_s16le")
+		args = append(args, "-map", "0:a:0", "-c:a", "pcm_s16le")
 	case "copy":
 		// Just container copy (probably pointless for same container)
 		args = append(args, "-c", "copy")

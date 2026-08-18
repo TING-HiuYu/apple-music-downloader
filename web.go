@@ -344,6 +344,9 @@ func (m *taskManager) create(request DownloadRequest) (*WebTask, error) {
 	if len(request.URLs) == 0 {
 		return nil, errors.New("urls cannot be empty")
 	}
+	if err := validateEmbeddingCompatibility(request); err != nil {
+		return nil, err
+	}
 	cleaned := make([]string, 0, len(request.URLs))
 	for _, rawURL := range request.URLs {
 		rawURL = strings.TrimSpace(rawURL)
@@ -423,6 +426,11 @@ func (m *taskManager) worker() {
 		})
 		var files []TaskFile
 		if err == nil {
+			// Artwork is downloaded only as a temporary source for media tags. The
+			// browser should receive the tagged media file, never a cover sidecar.
+			err = removeStandaloneArtwork(stagingDirectory)
+		}
+		if err == nil {
 			files, err = collectTaskFiles(stagingDirectory)
 			if err == nil && !containsMediaFile(files) {
 				err = errors.New("解密失败：没有生成音频或视频文件")
@@ -435,6 +443,27 @@ func (m *taskManager) worker() {
 		}
 		m.finish(id, files, err)
 	}
+}
+
+func validateEmbeddingCompatibility(request DownloadRequest) error {
+	format := strings.ToLower(strings.TrimSpace(request.ConvertFormat))
+	if format == "" || format == "none" || format == "copy" || format == "flac" || format == "mp3" {
+		return nil
+	}
+	if format == "opus" && request.EmbedCover {
+		return errors.New("Opus 不支持可靠地内嵌封面，请关闭内嵌封面或选择 FLAC/MP3")
+	}
+	if format == "wav" {
+		switch {
+		case request.EmbedLyrics && request.EmbedCover:
+			return errors.New("WAV 不支持可靠地内嵌歌词和封面，请关闭内嵌选项或选择 FLAC/MP3")
+		case request.EmbedLyrics:
+			return errors.New("WAV 不支持可靠地内嵌歌词，请关闭内嵌歌词或选择 FLAC/MP3/Opus")
+		case request.EmbedCover:
+			return errors.New("WAV 不支持可靠地内嵌封面，请关闭内嵌封面或选择 FLAC/MP3")
+		}
+	}
+	return nil
 }
 
 func (m *taskManager) updateProgress(id, stage string, percent int) {
@@ -564,6 +593,22 @@ func collectTaskFiles(root string) ([]TaskFile, error) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
 	return files, nil
+}
+
+func removeStandaloneArtwork(root string) error {
+	imageExtensions := map[string]bool{
+		".avif": true, ".gif": true, ".jpeg": true, ".jpg": true,
+		".png": true, ".webp": true,
+	}
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !imageExtensions[strings.ToLower(filepath.Ext(entry.Name()))] {
+			return nil
+		}
+		return os.Remove(path)
+	})
 }
 
 func (m *taskManager) openTaskFile(taskID, fileID string) (*os.File, TaskFile, error) {
