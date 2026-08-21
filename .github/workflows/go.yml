@@ -11,14 +11,16 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.23.1'
+        go-version-file: go.mod
+    - name: Test
+      run: go test ./...
     - name: Build
       run: |
-        go build -o main.exe -v ./main.go
+        go build -o main.exe -v .
     - name: Create a new directory and copy files
       run: |
         mkdir -p alac
@@ -36,14 +38,16 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.23.1'
+        go-version-file: go.mod
+    - name: Test
+      run: go test ./...
     - name: Build
       run: |
-        go build -o main -v ./main.go
+        go build -o main -v .
     - name: Create a new directory and copy files
       run: |
         mkdir -p alac
@@ -61,14 +65,16 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.23.1'
+        go-version-file: go.mod
+    - name: Test
+      run: go test ./...
     - name: Build
       run: |
-        go build -o main -v ./main.go
+        go build -o main -v .
     - name: Create a new directory and copy files
       run: |
         mkdir -p alac
