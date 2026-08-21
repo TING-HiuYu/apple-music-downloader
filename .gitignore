@@ -11,6 +11,8 @@
 !/web.go
 !/queue_store.go
 !/wrapper_manager.go
+!/wrapper_process_unix.go
+!/wrapper_process_windows.go
 !/README.md
 !/PROXY-SETUP.md
 !/DOCKER-BUILD.md

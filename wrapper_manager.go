@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -134,7 +133,7 @@ func (m *wrapperManager) start(withCredentials bool, username, password string) 
 	command := exec.Command(binary, args...)
 	command.Dir = "/opt/wrapper"
 	command.Env = wrapperEnvironment()
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureWrapperProcess(command)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return err
@@ -493,26 +492,6 @@ func (m *wrapperManager) logout() error {
 	m.addEventLocked(m.message)
 	m.mu.Unlock()
 	return nil
-}
-
-func stopCredentialWrapper(command *exec.Cmd) {
-	if command == nil || command.Process == nil {
-		return
-	}
-	pgid, groupErr := syscall.Getpgid(command.Process.Pid)
-	if groupErr == nil {
-		_ = syscall.Kill(-pgid, syscall.SIGINT)
-	} else {
-		_ = command.Process.Signal(os.Interrupt)
-	}
-	timer := time.NewTimer(500 * time.Millisecond)
-	defer timer.Stop()
-	<-timer.C
-	if groupErr == nil {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	} else {
-		_ = command.Process.Kill()
-	}
 }
 
 func (m *wrapperManager) submitTwoFA(code string) error {
